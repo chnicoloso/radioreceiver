@@ -14,28 +14,26 @@
 
 /** State machine to orchestrate the RTL2832, demodulation, and audio playing. */
 
+import { U8ToFloat32 } from "../dsp/converters";
 import { RadioError, RadioErrorType } from "../errors";
-import { RTL2832U } from "../rtlsdr/rtl2832u";
+import { RtlDevice, RtlDeviceProvider } from "../rtlsdr/rtldevice";
 import { Channel } from "./msgqueue";
 import { SampleReceiver } from "./sample_receiver";
 
-/**
- * A message sent to the state machine.
- *
- * All of these messages are also 'radio' event details.
- */
+/** A message sent to the state machine. */
 type Message =
   | { type: "start" }
   | { type: "stop" }
   | { type: "frequency"; value: number }
   | { type: "frequencyCorrection"; value: number }
   | { type: "gain"; value: number | null }
-  | { type: "scan"; min: number; max: number; step: number };
+  | { type: "directSamplingEnabled"; value: boolean };
 
 /** The information in a 'radio' event. */
 export type RadioEventType =
-  | Message
-  | { type: "stop_scan"; frequency: number }
+  | { type: "started" }
+  | { type: "stopped" }
+  | { type: "directSampling"; active: boolean }
   | { type: "error"; exception: any };
 
 /** The type of 'radio' events. */
@@ -49,25 +47,26 @@ export class RadioEvent extends CustomEvent<RadioEventType> {
 enum State {
   OFF,
   PLAYING,
-  SCANNING,
 }
 
 /** Provides controls to play, stop, and scan the radio. */
 export class Radio extends EventTarget {
   /** @param sampleReceiver the object that will receive the radio samples. */
-  constructor(private sampleReceiver: SampleReceiver) {
+  constructor(
+    private rtlProvider: RtlDeviceProvider,
+    private sampleReceiver: SampleReceiver,
+    private sampleRate: number
+  ) {
     super();
-    this.device = undefined;
     this.state = State.OFF;
     this.channel = new Channel<Message>();
     this.frequencyCorrection = 0;
     this.gain = null;
     this.frequency = 88500000;
+    this.directSamplingEnabled = false;
     this.runLoop();
   }
 
-  /** USB device that the tuner is connected to. */
-  private device?: USBDevice;
   /** Current state. */
   private state: State;
   /** Channel to send messages to the state machine. */
@@ -78,43 +77,17 @@ export class Radio extends EventTarget {
   private gain: number | null;
   /** Currently tuned frequency. */
   private frequency: number;
-
-  /** Known RTL2832 devices. */
-  private static TUNERS = [
-    { vendorId: 0x0bda, productId: 0x2832 },
-    { vendorId: 0x0bda, productId: 0x2838 },
-  ];
-  /** RTL sample rate. Must be a multiple of 512 * BUFS_PER_SEC. */
-  private static SAMPLE_RATE = 1024000;
-  /** Receive this many buffers per second. */
-  private static BUFS_PER_SEC = 20;
-  /** How many samples to receive in each buffer. */
-  private static SAMPLES_PER_BUF = Math.floor(
-    Radio.SAMPLE_RATE / Radio.BUFS_PER_SEC
-  );
+  /** Whether direct sampling mode is enabled. */
+  private directSamplingEnabled: boolean;
 
   /** Starts playing the radio. */
-  async start() {
+  start() {
     this.channel.send({ type: "start" });
   }
 
   /** Stops playing the radio. */
-  async stop() {
+  stop() {
     this.channel.send({ type: "stop" });
-  }
-
-  /**
-   * Starts scanning for a signal.
-   *
-   * If the radio was already scanning, changes the scan parameters.
-   * A scan ends when a signal is found, or when a command other than
-   * 'scan' is sent to the radio.
-   * @param min The minimum frequency for the scan (included).
-   * @param max The maximum frequency for the scan (included).
-   * @param step The size of the frequency steps.
-   */
-  async scan(min: number, max: number, step: number) {
-    this.channel.send({ type: "scan", min: min, max: max, step: step });
   }
 
   /** Returns whether the radio is playing (or scanning). */
@@ -122,23 +95,18 @@ export class Radio extends EventTarget {
     return this.state != State.OFF;
   }
 
-  /** Returns whether the radio is scanning. */
-  isScanning() {
-    return this.state == State.SCANNING;
-  }
-
   /** Tunes the radio to this frequency. */
-  async setFrequency(freq: number) {
+  setFrequency(freq: number) {
     this.channel.send({ type: "frequency", value: freq });
   }
 
-  /** Returns the currently tuned frequency. */
+  /** Returns the tuned frequency. */
   getFrequency(): number {
     return this.frequency;
   }
 
   /** Sets the frequency correction factor, in PPM. */
-  async setFrequencyCorrection(ppm: number) {
+  setFrequencyCorrection(ppm: number) {
     this.channel.send({ type: "frequencyCorrection", value: ppm });
   }
 
@@ -151,7 +119,7 @@ export class Radio extends EventTarget {
    * Sets the RF gain.
    * @param gain the gain in dB, or null for automatic gain control.
    */
-  async setGain(gain: number | null) {
+  setGain(gain: number | null) {
     this.channel.send({ type: "gain", value: gain });
   }
 
@@ -163,22 +131,36 @@ export class Radio extends EventTarget {
     return this.gain;
   }
 
+  /** Enables or disables direct sampling mode. */
+  enableDirectSampling(enable: boolean) {
+    this.channel.send({ type: "directSamplingEnabled", value: enable });
+  }
+
+  /** Returns whether direct sampling mode is enabled. */
+  isDirectSamplingEnabled(): boolean {
+    return this.directSamplingEnabled;
+  }
+
+  /** Changes the sample rate. This change only takes effect when the radio is started. */
+  setSampleRate(sampleRate: number) {
+    this.sampleRate = sampleRate;
+  }
+
+  /** Returns the current sample rate. */
+  getSampleRate(): number {
+    return this.sampleRate;
+  }
+
   /** Runs the state machine. */
   private async runLoop() {
     let transfers: Transfers;
-    let rtl: RTL2832U;
-    let scan: { min: number; max: number; step: number };
-    let msgPromise: Promise<Message> | undefined;
-    let transferPromise: Promise<boolean> | undefined;
+    let rtl: RtlDevice;
     while (true) {
-      if (msgPromise === undefined) msgPromise = this.channel.receive();
+      let msg = await this.channel.receive();
       try {
         switch (this.state) {
           case State.OFF: {
-            let msg = await msgPromise;
-            msgPromise = undefined;
             if (msg.type == "frequency" && this.frequency != msg.value) {
-              this.dispatchEvent(new RadioEvent(msg));
               this.frequency = msg.value;
             }
             if (
@@ -186,156 +168,66 @@ export class Radio extends EventTarget {
               this.frequencyCorrection != msg.value
             ) {
               this.frequencyCorrection = msg.value;
-              this.dispatchEvent(new RadioEvent(msg));
             }
             if (msg.type == "gain" && this.gain != msg.value) {
-              this.dispatchEvent(new RadioEvent(msg));
               this.gain = msg.value;
             }
-            if (msg.type != "start") continue;
-            if (this.device === undefined) {
-              if (navigator.usb === undefined) {
-                throw new RadioError(
-                  `This browser does not support the HTML5 USB API`,
-                  RadioErrorType.NoUsbSupport
-                );
-              }
-              try {
-                this.device = await navigator.usb.requestDevice({
-                  filters: Radio.TUNERS,
-                });
-              } catch (e) {
-                throw new RadioError(
-                  `No device was selected`,
-                  RadioErrorType.NoDeviceSelected,
-                  { cause: e }
-                );
-              }
+            if (
+              msg.type == "directSamplingEnabled" &&
+              this.directSamplingEnabled != msg.value
+            ) {
+              this.directSamplingEnabled = msg.value;
             }
-            await this.device!.open();
-            rtl = await RTL2832U.open(this.device!);
-            await rtl.setSampleRate(Radio.SAMPLE_RATE);
+            if (msg.type != "start") continue;
+            rtl = await this.rtlProvider.get();
+            await rtl.setSampleRate(this.sampleRate);
             await rtl.setFrequencyCorrection(this.frequencyCorrection);
             await rtl.setGain(this.gain);
+            await rtl.enableDirectSampling(this.directSamplingEnabled);
             await rtl.setCenterFrequency(this.frequency);
             await rtl.resetBuffer();
             transfers = new Transfers(
               rtl,
               this.sampleReceiver,
               this,
-              Radio.SAMPLES_PER_BUF
+              this.sampleRate
             );
             transfers.startStream();
             this.state = State.PLAYING;
-            this.dispatchEvent(new RadioEvent(msg));
+            this.dispatchEvent(new RadioEvent({ type: "started" }));
             break;
           }
           case State.PLAYING: {
-            let msg = await msgPromise;
-            msgPromise = undefined;
             switch (msg.type) {
               case "frequency":
                 if (this.frequency != msg.value) {
                   this.frequency = msg.value;
                   await rtl!.setCenterFrequency(this.frequency);
-                  this.dispatchEvent(new RadioEvent(msg));
                 }
                 break;
               case "gain":
                 if (this.gain != msg.value) {
                   this.gain = msg.value;
                   await rtl!.setGain(this.gain);
-                  this.dispatchEvent(new RadioEvent(msg));
                 }
                 break;
               case "frequencyCorrection":
                 if (this.frequencyCorrection != msg.value) {
                   this.frequencyCorrection = msg.value;
                   await rtl!.setFrequencyCorrection(this.frequencyCorrection);
-                  this.dispatchEvent(new RadioEvent(msg));
                 }
                 break;
-              case "scan":
-                scan = { min: msg.min, max: msg.max, step: msg.step };
-                await transfers!.stopStream();
-                this.dispatchEvent(new RadioEvent(msg));
-                this.state = State.SCANNING;
+              case "directSamplingEnabled":
+                if (this.directSamplingEnabled != msg.value) {
+                  this.directSamplingEnabled = msg.value;
+                  await rtl!.enableDirectSampling(this.directSamplingEnabled);
+                }
                 break;
               case "stop":
                 await transfers!.stopStream();
                 await rtl!.close();
-                await this.device!.close();
                 this.state = State.OFF;
-                this.dispatchEvent(new RadioEvent(msg));
-                break;
-              default:
-              // do nothing.
-            }
-            break;
-          }
-          case State.SCANNING: {
-            if (transferPromise === undefined) {
-              let newFreq = this.frequency + scan!.step;
-              if (newFreq > scan!.max) newFreq = scan!.min;
-              if (newFreq < scan!.min) newFreq = scan!.max;
-              this.frequency = newFreq;
-              await rtl!.setCenterFrequency(this.frequency);
-              this.dispatchEvent(
-                new RadioEvent({ type: "frequency", value: this.frequency })
-              );
-              transferPromise = transfers!.oneShot();
-            }
-            let msg = await Promise.any([transferPromise, msgPromise]);
-            if ("boolean" === typeof msg) {
-              transferPromise = undefined;
-              if (msg === true) {
-                this.dispatchEvent(
-                  new RadioEvent({
-                    type: "stop_scan",
-                    frequency: this.frequency,
-                  })
-                );
-                this.state = State.PLAYING;
-                transfers!.startStream();
-              }
-              continue;
-            }
-            msgPromise = undefined;
-            if (msg.type == "scan") {
-              scan = { min: msg.min, max: msg.max, step: msg.step };
-              this.dispatchEvent(new RadioEvent(msg));
-              continue;
-            }
-            if (msg.type == "stop") {
-              await rtl!.close();
-              await this.device!.close();
-              this.state = State.OFF;
-              this.dispatchEvent(new RadioEvent(msg));
-              continue;
-            }
-            this.state = State.PLAYING;
-            transfers!.startStream();
-            switch (msg.type) {
-              case "frequency":
-                if (this.frequency != msg.value) {
-                  this.frequency = msg.value;
-                  await rtl!.setCenterFrequency(this.frequency);
-                  this.dispatchEvent(new RadioEvent(msg));
-                }
-                break;
-              case "gain":
-                if (this.gain != msg.value) {
-                  this.gain = msg.value;
-                  await rtl!.setGain(this.gain);
-                  this.dispatchEvent(new RadioEvent(msg));
-                }
-                break;
-              case "frequencyCorrection":
-                if (this.frequencyCorrection != msg.value) {
-                  this.frequencyCorrection = msg.value;
-                  await rtl!.setFrequencyCorrection(this.frequencyCorrection);
-                  this.dispatchEvent(new RadioEvent(msg));
-                }
+                this.dispatchEvent(new RadioEvent({ type: "stopped" }));
                 break;
               default:
               // do nothing.
@@ -378,31 +270,38 @@ export class Radio extends EventTarget {
  * Maintains 2 active USB transfers. When a transfer ends, it calls
  * the sample receiver's 'receiveSamples' function and starts a new
  * transfer. In this way, there is always a stream of samples coming in.
- *
- * There is also an "one shot" mode, which is used for scanning. When
- * the transfer ends, it calls the 'checkForSignal' function and returns
- * its result.
  */
 class Transfers {
+  /** Receive this many buffers per second. */
+  private static BUFS_PER_SEC = 20;
+
   constructor(
-    private rtl: RTL2832U,
+    private rtl: RtlDevice,
     private sampleReceiver: SampleReceiver,
     private radio: Radio,
-    private samplesPerBuf: number
+    private sampleRate: number
   ) {
+    this.samplesPerBuf =
+      512 * Math.ceil(sampleRate / Transfers.BUFS_PER_SEC / 512);
     this.buffersWanted = 0;
     this.buffersRunning = 0;
+    this.iqConverter = new U8ToFloat32(this.samplesPerBuf);
+    this.directSampling = false;
     this.stopCallback = Transfers.nilCallback;
   }
 
+  private samplesPerBuf: number;
   private buffersWanted: number;
   private buffersRunning: number;
+  private iqConverter: U8ToFloat32;
+  private directSampling: boolean;
   private stopCallback: () => void;
 
   static PARALLEL_BUFFERS = 2;
 
   /** Starts the transfers as a stream. */
   async startStream() {
+    this.sampleReceiver.setSampleRate(this.sampleRate);
     await this.rtl.resetBuffer();
     this.buffersWanted = Transfers.PARALLEL_BUFFERS;
     while (this.buffersRunning < this.buffersWanted) {
@@ -423,22 +322,22 @@ class Transfers {
     return promise;
   }
 
-  /**
-   * Does one transfer, calls 'checkForSignal' in the sample receiver, and
-   * returns the result.
-   */
-  async oneShot(): Promise<boolean> {
-    await this.rtl.resetBuffer();
-    let buffer = await this.rtl.readSamples(this.samplesPerBuf);
-    return this.sampleReceiver.checkForSignal(buffer);
-  }
-
   /** Runs the transfer stream. */
   private readStream() {
     this.rtl
       .readSamples(this.samplesPerBuf)
       .then((b) => {
-        this.sampleReceiver.receiveSamples(b);
+        let [I, Q] = this.iqConverter.convert(b.data);
+        this.sampleReceiver.receiveSamples(I, Q, b.frequency);
+        if (this.directSampling != b.directSampling) {
+          this.directSampling = b.directSampling;
+          this.radio.dispatchEvent(
+            new RadioEvent({
+              type: "directSampling",
+              active: this.directSampling,
+            })
+          );
+        }
         if (this.buffersRunning <= this.buffersWanted) return this.readStream();
         --this.buffersRunning;
         if (this.buffersRunning == 0) {
@@ -447,7 +346,11 @@ class Transfers {
         }
       })
       .catch((e) => {
-        let error = new RadioError("Sample transfer was interrupted. Did you unplug your device?", RadioErrorType.UsbTransferError, { cause: e });
+        let error = new RadioError(
+          "Sample transfer was interrupted. Did you unplug your device?",
+          RadioErrorType.UsbTransferError,
+          { cause: e }
+        );
         let event = new RadioEvent({ type: "error", exception: error });
         this.radio.dispatchEvent(event);
       });

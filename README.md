@@ -6,7 +6,7 @@ Try it out at [radio.ea1iti.es](https://radio.ea1iti.es).
 
 ## What is this
 
-Radio Receiver is ah HTML5 webpage that uses an USB digital TV receiver to capture radio signals, demodulates them in the browser, and plays the demodulated audio through your computer's speakers or headphones. This is called SDR (Software-Defined Radio), because all the radio signal processing is done by software running in the computer instead of purpose-built hardware.
+Radio Receiver is an HTML5 webpage that uses an USB digital TV receiver to capture radio signals, demodulates them in the browser, and plays the demodulated audio through your computer's speakers or headphones. This is called SDR (Software-Defined Radio), because all the radio signal processing is done by software running in the computer instead of purpose-built hardware.
 
 ## Compatible hardware and software
 
@@ -17,7 +17,7 @@ Radio Receiver was written to work with an RTL-2832U-based DVB-T (European digit
 For a development build:
 
 ```shell
-$ node run build
+$ npm run build
 ```
 
 You can find the output in the directory `dist`.
@@ -25,13 +25,13 @@ You can find the output in the directory `dist`.
 For a development build served from your computer with live reload:
 
 ```shell
-$ node run watch
+$ npm run watch
 ```
 
 For a release build:
 
 ```shell
-$ node run dist
+$ npm run dist
 ```
 
 You can find the output in the directory `dist`.

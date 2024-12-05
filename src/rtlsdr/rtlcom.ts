@@ -36,6 +36,14 @@ export class RtlCom {
     await this.device.releaseInterface(0);
   }
 
+  /** Returns branding information. */
+  getBranding(): { manufacturer?: string; model?: string } {
+    return {
+      manufacturer: this.device.manufacturerName,
+      model: this.device.productName,
+    };
+  }
+
   /**
    * Writes to a USB control register.
    * @param address The register's address.
@@ -50,10 +58,18 @@ export class RtlCom {
    * Writes to a 8051 system register.
    * @param address The register's address.
    * @param value The value to write.
-   * @param length The number of bytes this value uses.
    */
   async setSysReg(address: number, value: number) {
     await this._setReg(0x200, address, value, 1);
+  }
+
+  /**
+   * Reads from a 8051 system register.
+   * @param address The register's address.
+   * @returns The value that was read.
+   */
+  async getSysReg(address: number): Promise<number> {
+    return this._getReg(0x200, address, 1);
   }
 
   /**
@@ -115,6 +131,19 @@ export class RtlCom {
     return this._getRegBuffer(0x600, addr, len);
   }
 
+  async setGpioOutput(gpio: number) {
+    let r = await this.getSysReg(0x3004);
+    await this.setSysReg(0x3004, r & ~gpio);
+    r = await this.getSysReg(0x3003);
+    await this.setSysReg(0x3003, r | gpio);
+  }
+
+  async setGpioBit(gpio: number, val: number) {
+    let r = await this.getSysReg(0x3001);
+    r = val ? (r | gpio) : (r & ~gpio);
+    await this.setSysReg(0x3001, r);
+  }
+
   /**
    * Does a bulk transfer from the device.
    * @param length The number of bytes to read.
@@ -145,6 +174,11 @@ export class RtlCom {
   /** Closes the I2C repeater. */
   async closeI2C() {
     await this.setDemodReg(1, 1, 0x10, 1);
+  }
+
+  /** Closes the connection. */
+  async close() {
+    await this.device.close();
   }
 
   /**

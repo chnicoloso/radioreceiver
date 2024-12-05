@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { Demodulated, ModulationScheme } from "./scheme";
-import * as DSP from "../dsp/dsp";
+import { makeLowPassKernel } from "../dsp/coefficients";
+import { FMDemodulator } from "../dsp/demodulators";
+import { FIRFilter, FrequencyShifter } from "../dsp/filters";
+import { ComplexDownsampler } from "../dsp/resamplers";
+import { Demodulated, Mode, ModulationScheme } from "./scheme";
 
 /** A demodulator for narrowband FM signals. */
 export class SchemeNBFM implements ModulationScheme {
@@ -22,39 +25,58 @@ export class SchemeNBFM implements ModulationScheme {
    * @param outRate The sample rate of the output audio.
    * @param maxF The frequency shift for maximum amplitude.
    */
-  constructor(inRate: number, outRate: number, maxF: number) {
-    const multiple = 1 + Math.floor(((maxF - 1) * 7) / 75000);
-    const interRate = 48000 * multiple;
-    const filterF = maxF * 0.8;
-
-    this.demodulator = new DSP.FMDemodulator(
-      inRate,
-      interRate,
-      maxF,
-      filterF,
-      Math.floor((50 * 7) / multiple)
-    );
-    const filterCoefs = DSP.getLowPassFIRCoeffs(interRate, 8000, 41);
-    this.downSampler = new DSP.Downsampler(interRate, outRate, filterCoefs);
+  constructor(
+    inRate: number,
+    private outRate: number,
+    private mode: Mode & { scheme: "NBFM" }
+  ) {
+    this.shifter = new FrequencyShifter(inRate);
+    this.downsampler = new ComplexDownsampler(inRate, outRate, 151);
+    const kernel = makeLowPassKernel(outRate, mode.maxF, 151);
+    this.filterI = new FIRFilter(kernel);
+    this.filterQ = new FIRFilter(kernel);
+    this.demodulator = new FMDemodulator(mode.maxF / outRate);
   }
 
-  private demodulator: DSP.FMDemodulator;
-  private downSampler: DSP.Downsampler;
+  private shifter: FrequencyShifter;
+  private downsampler: ComplexDownsampler;
+  private filterI: FIRFilter;
+  private filterQ: FIRFilter;
+  private demodulator: FMDemodulator;
+
+  getMode(): Mode {
+    return this.mode;
+  }
+
+  setMode(mode: Mode & { scheme: "NBFM" }) {
+    this.mode = mode;
+    const kernel = makeLowPassKernel(this.outRate, mode.maxF, 151);
+    this.filterI.setCoefficients(kernel);
+    this.filterQ.setCoefficients(kernel);
+    this.demodulator.setMaxDeviation(mode.maxF / this.outRate);
+  }
 
   /**
    * Demodulates the signal.
    * @param samplesI The I components of the samples.
    * @param samplesQ The Q components of the samples.
+   * @param freqOffset The offset of the signal in the samples.
    * @returns The demodulated audio signal.
    */
-  demodulate(samplesI: Float32Array, samplesQ: Float32Array): Demodulated {
-    const demodulated = this.demodulator.demodulateTuned(samplesI, samplesQ);
-    const audio = this.downSampler.downsample(demodulated);
+  demodulate(
+    samplesI: Float32Array,
+    samplesQ: Float32Array,
+    freqOffset: number
+  ): Demodulated {
+    this.shifter.inPlace(samplesI, samplesQ, -freqOffset);
+    const [I, Q] = this.downsampler.downsample(samplesI, samplesQ);
+    this.filterI.inPlace(I);
+    this.filterQ.inPlace(Q);
+    this.demodulator.demodulate(I, Q, I);
     return {
-      left: audio,
-      right: new Float32Array(audio),
+      left: I,
+      right: new Float32Array(I),
       stereo: false,
-      signalLevel: this.demodulator.getRelSignalPower(),
     };
   }
 }

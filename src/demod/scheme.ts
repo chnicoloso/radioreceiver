@@ -14,7 +14,18 @@
 
 /** Interface for classes that demodulate IQ radio streams. */
 export interface ModulationScheme {
-  demodulate(I: Float32Array, Q: Float32Array, inStereo?: boolean): Demodulated;
+  /** Returns the current mode parameters. */
+  getMode(): Mode;
+  /** Changes the mode parameters for the current scheme. */
+  setMode(mode: Mode): void;
+  /**
+   * Demodulates the signal.
+   * @param samplesI The I components of the samples.
+   * @param samplesQ The Q components of the samples.
+   * @param freqOffset The offset of the signal in the samples.
+   * @returns The demodulated audio signal.
+   */
+  demodulate(I: Float32Array, Q: Float32Array, freqOffset: number): Demodulated;
 }
 
 /** Demodulator output. */
@@ -25,14 +36,12 @@ export type Demodulated = {
   right: Float32Array;
   /** The signal is in stereo. */
   stereo: boolean;
-  /** Intelligibility level, 0 to 1. */
-  signalLevel: number;
 };
 
 /** Modulation parameters. */
 export type Mode =
   /** Wideband frequency modulation. */
-  | { scheme: "WBFM" }
+  | { scheme: "WBFM"; stereo: boolean }
   /** Narrowband frequency modulation. */
   | { scheme: "NBFM"; maxF: number }
   /** Amplitude modulation. */
@@ -40,4 +49,6 @@ export type Mode =
   /** Upper sideband modulation. */
   | { scheme: "USB"; bandwidth: number }
   /** Lower sideband modulation. */
-  | { scheme: "LSB"; bandwidth: number };
+  | { scheme: "LSB"; bandwidth: number }
+  /** Continuous wave. */
+  | { scheme: "CW"; bandwidth: number };

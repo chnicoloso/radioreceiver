@@ -15,11 +15,54 @@
 
 import { RadioError, RadioErrorType } from "../errors";
 import { R820T } from "./r820t";
+import { R828D } from "./r828d";
 import { RtlCom } from "./rtlcom";
+import { RtlDevice, RtlDeviceProvider, SampleBlock } from "./rtldevice";
 import { Tuner } from "./tuner";
 
+/** Known RTL2832 devices. */
+const TUNERS = [
+  { vendorId: 0x0bda, productId: 0x2832 },
+  { vendorId: 0x0bda, productId: 0x2838 },
+];
+
+/** Class that returns an open RTL2832U device. */
+export class RTL2832U_Provider implements RtlDeviceProvider {
+  constructor() {
+    this.device = undefined;
+  }
+
+  private device?: USBDevice;
+
+  async get(): Promise<RtlDevice> {
+    if (this.device === undefined) {
+      this.device = await this.getDevice();
+    }
+    await this.device!.open();
+    return RTL2832U.open(this.device!);
+  }
+
+  private async getDevice(): Promise<USBDevice> {
+    if (navigator.usb === undefined) {
+      throw new RadioError(
+        `This browser does not support the HTML5 USB API`,
+        RadioErrorType.NoUsbSupport
+      );
+    }
+    try {
+      return navigator.usb.requestDevice({ filters: TUNERS });
+    } catch (e) {
+      throw new RadioError(
+        `No device was selected`,
+        RadioErrorType.NoDeviceSelected,
+        { cause: e }
+      );
+    }
+  }
+}
+
 /** Operations on the RTL2832U demodulator. */
-export class RTL2832U {
+export class RTL2832U implements RtlDevice {
   /** Frequency of the oscillator crystal. */
   static XTAL_FREQ = 28800000;
 
@@ -33,11 +76,15 @@ export class RTL2832U {
     this.centerFrequency = 0;
     this.ppm = 0;
     this.gain = null;
+    this.directSamplingEnabled = false;
+    this.directSampling = false;
   }
 
   private centerFrequency: number;
   private ppm: number;
   private gain: number | null;
+  private directSamplingEnabled: boolean;
+  private directSampling: boolean;
 
   /**
    * Initializes the demodulator.
@@ -121,25 +168,15 @@ export class RTL2832U {
 
   /** Finds the tuner that's connected to this demodulator and returns the appropriate instance. */
   private static async _findTuner(com: RtlCom): Promise<Tuner> {
-    await com.openI2C();
-    let found = await R820T.check(com);
-    await com.closeI2C();
-    if (!found) {
+    let tuner = await R820T.maybeInit(com);
+    if (tuner === null) tuner = await R828D.maybeInit(com);
+    if (tuner === null) {
       await com.releaseInterface();
       throw new RadioError(
-        "Sorry, your USB dongle has an unsupported tuner chip. Only the R820T chip is supported.",
+        "Sorry, your USB dongle has an unsupported tuner chip.",
         RadioErrorType.UnsupportedDevice
       );
     }
-    // [0] disable zero-IF input [1] enable DC estimation [3] enable IQ compensation [4] enable IQ estimation
-    await com.setDemodReg(1, 0xb1, 0b00011010, 1);
-    // [6] enable ADC_Q [7] disable ADC_I
-    await com.setDemodReg(0, 0x08, 0b01001101, 1);
-    // [0] inverted spectrum
-    await com.setDemodReg(1, 0x15, 0b00000001, 1);
-    await com.openI2C();
-    let tuner = await R820T.init(com, RTL2832U.XTAL_FREQ);
-    await com.closeI2C();
     return tuner;
   }
 
@@ -169,15 +206,21 @@ export class RTL2832U {
     this.tuner.setXtalFrequency(xtalFrequency);
     let ifFreq = this.tuner.getIntermediateFrequency();
     if (ifFreq != 0) {
-      let multiplier = -1 * Math.floor((ifFreq * (1 << 22)) / xtalFrequency);
-      // [21:0] set IF frequency
-      await this.com.setDemodReg(1, 0x19, (multiplier >> 16) & 0x3f, 1);
-      await this.com.setDemodReg(1, 0x1a, (multiplier >> 8) & 0xff, 1);
-      await this.com.setDemodReg(1, 0x1b, multiplier & 0xff, 1);
+      await this._setIfFrequency(ifFreq);
     }
     if (this.centerFrequency != 0) {
       await this.setCenterFrequency(this.centerFrequency);
     }
+  }
+
+  private async _setIfFrequency(ifFreq: number): Promise<number> {
+    let xtalFrequency = this._getXtalFrequency();
+    let multiplier = -1 * Math.floor((ifFreq * (1 << 22)) / xtalFrequency);
+    // [21:0] set IF frequency
+    await this.com.setDemodReg(1, 0x19, (multiplier >> 16) & 0x3f, 1);
+    await this.com.setDemodReg(1, 0x1a, (multiplier >> 8) & 0xff, 1);
+    await this.com.setDemodReg(1, 0x1b, multiplier & 0xff, 1);
+    return Math.floor((-1 * multiplier * xtalFrequency) / (1 << 22));
   }
 
   getFrequencyCorrection(): number {
@@ -187,7 +230,9 @@ export class RTL2832U {
   async setGain(gain: number | null) {
     this.gain = gain;
     await this.com.openI2C();
-    if (this.gain === null) {
+    if (this.directSampling) {
+      this._enableRtlAgc(gain == null);
+    } else if (this.gain === null) {
       await this.tuner.setAutoGain();
     } else {
       await this.tuner.setManualGain(this.gain);
@@ -197,6 +242,10 @@ export class RTL2832U {
 
   getGain(): number | null {
     return this.gain;
+  }
+
+  private async _enableRtlAgc(enable: boolean) {
+    await this.com.setDemodReg(0, 0x19, enable ? 0x25 : 0x05, 1);
   }
 
   private _getXtalFrequency(): number {
@@ -216,11 +265,66 @@ export class RTL2832U {
    * @returns a promise that resolves to the actual tuned frequency.
    */
   async setCenterFrequency(freq: number): Promise<number> {
-    await this.com.openI2C();
-    let actualFreq = await this.tuner.setFrequency(freq);
+    await this._maybeSetDirectSampling(freq);
+    let actualFreq;
+    if (this.directSampling) {
+      actualFreq = this._setIfFrequency(freq);
+    } else {
+      await this.com.openI2C();
+      actualFreq = await this.tuner.setFrequency(freq);
+      await this.com.closeI2C();
+    }
     this.centerFrequency = freq;
-    await this.com.closeI2C();
     return actualFreq;
+  }
+
+  /**
+   * Enables or disables the ability to use direct sampling mode.
+   * If enabled, the radio will enter direct sampling mode for low frequencies. */
+  async enableDirectSampling(enable: boolean) {
+    if (this.directSamplingEnabled == enable) return;
+    this.directSamplingEnabled = enable;
+    if (this.centerFrequency != 0) {
+      await this.setCenterFrequency(this.centerFrequency);
+    }
+  }
+
+  /** Returns whether direct sampling is enabled. */
+  isDirectSamplingEnabled(): boolean {
+    return this.directSamplingEnabled;
+  }
+
+  private async _maybeSetDirectSampling(frequency: number) {
+    let enable = frequency < this.tuner.getMinimumFrequency();
+    enable = enable && this.directSamplingEnabled;
+    if (this.directSampling == enable) return;
+    this.directSampling = enable;
+    if (enable) {
+      await this.com.openI2C();
+      await this.tuner.close();
+      await this.com.closeI2C();
+      // [0] disable zero-IF input
+      await this.com.setDemodReg(1, 0xb1, 0b00011010, 1);
+      // [0] non-inverted spectrum
+      await this.com.setDemodReg(1, 0x15, 0b00000000, 1);
+      // [5:4] exchange ADC_I, ADC_Q datapath
+      await this.com.setDemodReg(0, 0x06, 0b10010000, 1);
+      await this._enableRtlAgc(true);
+    } else {
+      await this.com.openI2C();
+      await this.tuner.open();
+      await this.com.closeI2C();
+      let ifFreq = this.tuner.getIntermediateFrequency();
+      if (ifFreq != 0) {
+        await this._setIfFrequency(ifFreq);
+      }
+      // [0] inverted spectrum
+      await this.com.setDemodReg(1, 0x15, 0b00000001, 1);
+      // [5:4] default ADC_I, ADC_Q datapath
+      await this.com.setDemodReg(0, 0x06, 0b10000000, 1);
+      await this._enableRtlAgc(false);
+      await this.setGain(this.getGain());
+    }
   }
 
   /** Resets the sample buffer. Call this before starting to read samples. */
@@ -233,13 +337,13 @@ export class RTL2832U {
   /**
    * Reads a block of samples off the device.
    * @param length The number of samples to read.
-   * @returns a promise that resolves to an ArrayBuffer
-   *     containing the read samples, which you can interpret as pairs of
-   *     unsigned 8-bit integers; the first one is the sample's I value, and
-   *     the second one is its Q value.
+   * @returns a promise that resolves to a SampleBlock.
    */
-  async readSamples(length: number): Promise<ArrayBuffer> {
-    return this.com.getSamples(length * RTL2832U.BYTES_PER_SAMPLE);
+  async readSamples(length: number): Promise<SampleBlock> {
+    const data = await this.com.getSamples(length * RTL2832U.BYTES_PER_SAMPLE);
+    const frequency = this.centerFrequency;
+    const directSampling = this.directSampling;
+    return { frequency, directSampling, data };
   }
 
   /** Stops the demodulator. */
@@ -248,5 +352,6 @@ export class RTL2832U {
     await this.tuner.close();
     await this.com.closeI2C();
     await this.com.releaseInterface();
+    await this.com.close();
   }
 }

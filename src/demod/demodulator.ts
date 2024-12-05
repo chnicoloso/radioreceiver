@@ -22,81 +22,50 @@
  * Whenever a parameter is changed, the demodulator emits a
  * 'demodulator' event containing the new value. This makes it easy
  * to observe the demodulator's state.
- *
- * The demodulator also emits periodic 'signalLevel' events.
  */
 
 import { ModulationScheme, Mode } from "./scheme";
 import { SchemeAM } from "./scheme-am";
+import { SchemeCW } from "./scheme-cw";
 import { SchemeNBFM } from "./scheme-nbfm";
 import { SchemeSSB } from "./scheme-ssb";
 import { SchemeWBFM } from "./scheme-wbfm";
 import { Player } from "../audio/player";
-import { SampleReceiver } from "../radio/sample_receiver";
-import * as DSP from "../dsp/dsp";
+import { concatenateReceivers, SampleReceiver } from "../radio/sample_receiver";
 
-/** The various contents of the events that the demodulator emits. */
-export type DemodulatorEventType =
-  | { type: "mode"; mode: Mode }
-  | { type: "volume"; value: number }
-  | { type: "stereo"; value: boolean }
-  | { type: "squelch"; value: number };
-
-/** The demodulator event type. */
-export class DemodulatorEvent extends CustomEvent<DemodulatorEventType> {
-  constructor(e: DemodulatorEventType) {
-    super("demodulator", { detail: e });
-  }
-}
-
-/**
- * The signal level event type.
- * It contains an intelligibility level from 0 to 1.
- */
-export class SignalLevelEvent extends CustomEvent<number> {
-  constructor(level: number) {
-    super("signalLevel", { detail: level });
-  }
-}
+type Frequency = {
+  center: number;
+  offset: number;
+};
 
 /** The demodulator class. */
 export class Demodulator extends EventTarget implements SampleReceiver {
-  /** Fixed input rate. */
-  private static IN_RATE = 1024000;
-  /** Fixed output rate. */
-  private static OUT_RATE = 48000;
-
-  constructor() {
+  constructor(private inRate: number) {
     super();
-    this.mode = { scheme: "WBFM" };
-    this.scheme = this.getScheme(this.mode);
     this.player = new Player();
-    this.stereo = false;
-    this.squelch = 0;
-    this.signalLevelDispatcher = new SignalLevelDispatcher(
-      Demodulator.OUT_RATE / 10,
-      this
-    );
+    this.mode = { scheme: "WBFM", stereo: true };
+    this.scheme = this.getScheme(this.mode);
+    this.frequencyOffset = 0;
+    this.latestStereo = false;
   }
 
+  /** The audio output device. */
+  private player: Player;
   /** The modulation parameters as a Mode object. */
   private mode: Mode;
   /** The demodulator class. */
   private scheme: ModulationScheme;
-  /** The audio output device. */
-  private player: Player;
-  /** Whether to demodulate in stereo, when available. */
-  private stereo: boolean;
-  /** Squelch level, 0 to 1. */
-  private squelch: number;
-  /** The object that sends out the signal level events periodically. */
-  private signalLevelDispatcher: SignalLevelDispatcher;
+  /** The frequency offset to demodulate from. */
+  private frequencyOffset: number;
+  /** Whether the latest samples were in stereo. */
+  private latestStereo: boolean;
+  /** A frequency change we are expecting. */
+  private expectingFrequency?: Frequency;
 
   /** Changes the modulation parameters. */
   setMode(mode: Mode) {
+    this.scheme = this.getScheme(mode, this.scheme);
     this.mode = mode;
-    this.scheme = this.getScheme(this.mode);
-    this.dispatchEvent(new DemodulatorEvent({ type: "mode", mode: mode }));
   }
 
   /** Returns the current modulation parameters. */
@@ -104,10 +73,24 @@ export class Demodulator extends EventTarget implements SampleReceiver {
     return this.mode;
   }
 
+  /** Changes the frequency offset. */
+  setFrequencyOffset(offset: number) {
+    this.frequencyOffset = offset;
+  }
+
+  /** Returns the current frequency offset. */
+  getFrequencyOffset() {
+    return this.frequencyOffset;
+  }
+
+  /** Waits until samples arrive with the given center frequency and then sets the offset. */
+  expectFrequencyAndSetOffset(center: number, offset: number) {
+    this.expectingFrequency = { center, offset };
+  }
+
   /** Sets the audio volume level, from 0 to 1. */
   setVolume(volume: number) {
     this.player.setVolume(volume);
-    this.dispatchEvent(new DemodulatorEvent({ type: "volume", value: volume }));
   }
 
   /** Returns the current audio volume level. */
@@ -115,98 +98,60 @@ export class Demodulator extends EventTarget implements SampleReceiver {
     return this.player.getVolume();
   }
 
-  /** Sets whether to demodulate in stereo. */
-  setStereo(stereo: boolean) {
-    this.stereo = stereo;
-    this.dispatchEvent(new DemodulatorEvent({ type: "stereo", value: stereo }));
-  }
-
-  /** Returns whether we are demodulating in stereo. */
-  getStereo(): boolean {
-    return this.stereo;
-  }
-
-  /**
-   * Sets the squelch level, from 0 to 1.
-   * The squelch level is the minimum intelligibility level for the signal.
-   */
-  setSquelch(squelch: number) {
-    this.squelch = squelch;
-    this.dispatchEvent(
-      new DemodulatorEvent({ type: "squelch", value: squelch })
-    );
-  }
-
-  /** Returns the current squelch level. */
-  getSquelch(): number {
-    return this.squelch;
-  }
-
   /** Returns an appropriate instance of ModulationScheme for the requested mode. */
-  private getScheme(mode: Mode): ModulationScheme {
+  private getScheme(mode: Mode, scheme?: ModulationScheme): ModulationScheme {
+    if (mode.scheme == scheme?.getMode().scheme) {
+      scheme.setMode(mode);
+      return scheme;
+    }
+
     switch (mode.scheme) {
       case "AM":
-        return new SchemeAM(
-          Demodulator.IN_RATE,
-          Demodulator.OUT_RATE,
-          mode.bandwidth
-        );
+        return new SchemeAM(this.inRate, this.player.sampleRate, mode);
       case "NBFM":
-        return new SchemeNBFM(
-          Demodulator.IN_RATE,
-          Demodulator.OUT_RATE,
-          mode.maxF
-        );
+        return new SchemeNBFM(this.inRate, this.player.sampleRate, mode);
       case "WBFM":
-        return new SchemeWBFM(Demodulator.IN_RATE, Demodulator.OUT_RATE);
+        return new SchemeWBFM(this.inRate, this.player.sampleRate, mode);
       case "LSB":
-        return new SchemeSSB(
-          Demodulator.IN_RATE,
-          Demodulator.OUT_RATE,
-          mode.bandwidth,
-          false
-        );
       case "USB":
-        return new SchemeSSB(
-          Demodulator.IN_RATE,
-          Demodulator.OUT_RATE,
-          mode.bandwidth,
-          true
-        );
+        return new SchemeSSB(this.inRate, this.player.sampleRate, mode);
+      case "CW":
+        return new SchemeCW(this.inRate, this.player.sampleRate, mode);
     }
   }
 
+  /** Changes the sample rate. */
+  setSampleRate(sampleRate: number): void {
+    this.inRate = sampleRate;
+    this.scheme = this.getScheme(this.mode, undefined);
+  }
+
   /** Receives radio samples. */
-  receiveSamples(samples: ArrayBuffer): void {
-    this.demod(samples);
-  }
+  receiveSamples(I: Float32Array, Q: Float32Array, frequency: number): void {
+    if (this.expectingFrequency?.center === frequency) {
+      this.frequencyOffset = this.expectingFrequency.offset;
+      this.expectingFrequency = undefined;
+    }
 
-  /** Receives radio samples and returns whether there is a signal in it. */
-  async checkForSignal(samples: ArrayBuffer): Promise<boolean> {
-    return this.demod(samples) > 0.5;
-  }
-
-  /** Demodulates the given samples. */
-  private demod(samples: ArrayBuffer): number {
-    let [I, Q] = DSP.iqSamplesFromUint8(samples);
-    let { left, right, signalLevel } = this.scheme.demodulate(
+    let { left, right, stereo } = this.scheme.demodulate(
       I,
       Q,
-      this.stereo
+      this.frequencyOffset
     );
-    this.player.play(left, right, signalLevel, this.squelch);
-    this.signalLevelDispatcher.dispatch(signalLevel, left.length);
-    return signalLevel;
+    this.player.play(left, right);
+    if (stereo != this.latestStereo) {
+      this.dispatchEvent(new StereoStatusEvent(stereo));
+      this.latestStereo = stereo;
+    }
+  }
+
+  andThen(next: SampleReceiver): SampleReceiver {
+    return concatenateReceivers(this, next);
   }
 
   addEventListener(
-    type: "demodulator",
-    callback: (e: DemodulatorEvent) => void | null,
-    options?: boolean | AddEventListenerOptions | undefined
-  ): void;
-  addEventListener(
-    type: "signalLevel",
-    callback: (e: SignalLevelEvent) => void | null,
+    type: "stereo-status",
+    callback: (e: StereoStatusEvent) => void | null,
     options?: boolean | AddEventListenerOptions | undefined
   ): void;
   addEventListener(
@@ -227,27 +172,8 @@ export class Demodulator extends EventTarget implements SampleReceiver {
   }
 }
 
-// An auxiliary class that sends out signal level events periodically.
-class SignalLevelDispatcher {
-  constructor(
-    private everyNSamples: number,
-    private demodulator: Demodulator
-  ) {
-    this.sum = 0;
-    this.samples = 0;
-  }
-
-  sum: number;
-  samples: number;
-
-  dispatch(level: number, samples: number) {
-    this.sum += level * samples;
-    this.samples += samples;
-    if (this.samples < this.everyNSamples) return;
-    this.demodulator.dispatchEvent(
-      new SignalLevelEvent(this.sum / this.samples)
-    );
-    this.samples %= this.everyNSamples;
-    this.sum = level * this.samples;
+export class StereoStatusEvent extends CustomEvent<boolean> {
+  constructor(stereo: boolean) {
+    super("stereo-status", { detail: stereo, bubbles: true, composed: true });
   }
 }

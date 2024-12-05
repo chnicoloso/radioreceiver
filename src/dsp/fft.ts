@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/** Fast Fourier Transform implementation. */
+import { Float32RingBuffer, IqBuffer } from "./buffers";
 
-/** Array of complex numbers. Real and imaginary parts are separate. */
-export type ComplexArray = { real: Float32Array; imag: Float32Array };
+/** Fast Fourier Transform implementation. */
 
 /**
  * Returns the length of the FFT for a given array length.
@@ -30,6 +29,9 @@ export function actualLength(minimumLength: number): number {
   while (realLength < minimumLength) realLength <<= 1;
   return realLength;
 }
+
+/** The output of the transform functions. */
+export type FFTOutput = { real: Float32Array; imag: Float32Array };
 
 /** Fast Fourier Transform and reverse transform with a given length. */
 export class FFT {
@@ -48,67 +50,87 @@ export class FFT {
     let [fwd, bwd] = makeFftCoefficients(length);
     this.fwd = fwd;
     this.bwd = bwd;
+    this.copy = new IqBuffer(2, length);
+    this.out = new IqBuffer(2, length);
+    this.window = new Float32Array(length);
+    this.window.fill(1);
   }
 
   private revIndex: Int32Array;
   private fwd: ComplexArray[];
   private bwd: ComplexArray[];
+  private copy: IqBuffer;
+  private out: IqBuffer;
+  private window: Float32Array;
 
-  /**
-   * Transforms the given time-domain input. The inputs must be the same length
-   * as the FFT.
-   * @param real An array of real parts.
-   * @param imag An array of imaginary parts.
-   * @returns A complex array of frequency components, scaled so that the
-   *     square modulus corresponds to the input signal's mean square power.
-   */
-  transform(real: Float32Array, imag: Float32Array): ComplexArray;
-  transform(real: number[], imag: number[]): ComplexArray;
-  transform<T extends Array<number>>(real: T, imag: T): ComplexArray {
-    const length = this.length;
-    let output = {
-      real: new Float32Array(this.length),
-      imag: new Float32Array(this.length),
-    };
-    for (let i = 0; i < length; ++i) {
-      const ri = this.revIndex[i];
-      output.real[ri] = real[i] / length;
-      output.imag[ri] = imag[i] / length;
-    }
-    doFastTransform(this.length, this.fwd, output);
-    return output;
+  /** Sets the window function for this FFT. */
+  setWindow(window: Float32Array) {
+    this.window.set(window);
   }
 
   /**
-   * Does a reverse transform of the given frequency-domain input. The
-   * inputs must be the same length as the FFT.
+   * Transforms the given time-domain input.
    * @param real An array of real parts.
    * @param imag An array of imaginary parts.
-   * @returns A complex array of samples.
+   * @return An object containing an array of real parts and an array of imaginary parts.
    */
-  reverse(real: Float32Array, imag: Float32Array): ComplexArray;
-  reverse(real: number[], imag: number[]): ComplexArray;
-  reverse<T extends Array<number>>(real: T, imag: T): ComplexArray {
+  transform(real: Float32Array, imag: Float32Array): FFTOutput;
+  transform(real: number[], imag: number[]): FFTOutput;
+  transform<T extends Array<number>>(real: T, imag: T): FFTOutput {
     const length = this.length;
-    let output = {
-      real: new Float32Array(this.length),
-      imag: new Float32Array(this.length),
-    };
-    for (let i = 0; i < length; ++i) {
+    let [outReal, outImag] = this.out.get(length);
+    outReal.fill(0);
+    outImag.fill(0);
+    for (let i = 0; i < length && i < real.length && i < imag.length; ++i) {
       const ri = this.revIndex[i];
-      output.real[ri] = real[i];
-      output.imag[ri] = imag[i];
+      outReal[ri] = (this.window[i] * real[i]) / length;
+      outImag[ri] = (this.window[i] * imag[i]) / length;
     }
-    doFastTransform(length, this.bwd, output);
-    return output;
+    doFastTransform(this.length, this.fwd, outReal, outImag);
+    return { real: outReal, imag: outImag };
+  }
+
+  transformCircularBuffers(
+    real: Float32RingBuffer,
+    imag: Float32RingBuffer
+  ): FFTOutput {
+    const length = this.length;
+    let [copyReal, copyImag] = this.copy.get(length);
+    real.copyTo(copyReal);
+    imag.copyTo(copyImag);
+    return this.transform(copyReal, copyImag);
+  }
+
+  /**
+   * Does a reverse transform of the given frequency-domain input.
+   * The input and output arrays must be the same length as the FFT.
+   * @param real An array of real parts.
+   * @param imag An array of imaginary parts.
+   * @return An object containing an array of real parts and an array of imaginary parts.
+   */
+  reverse(real: Float32Array, imag: Float32Array): FFTOutput;
+  reverse(real: number[], imag: number[]): FFTOutput;
+  reverse<T extends Array<number>>(real: T, imag: T): FFTOutput {
+    const length = this.length;
+    let [outReal, outImag] = this.out.get(length);
+    outReal.fill(0);
+    outImag.fill(0);
+    for (let i = 0; i < length && i < real.length && i < imag.length; ++i) {
+      const ri = this.revIndex[i];
+      outReal[ri] = (this.window[i] * real[i]) / length;
+      outImag[ri] = (this.window[i] * imag[i]) / length;
+    }
+    doFastTransform(this.length, this.bwd, outReal, outImag);
+    return { real: outReal, imag: outImag };
   }
 }
 
-/** Performs a fast direct or reverse transform in place on the 'output' array. */
+/** Performs a fast direct or reverse transform in place. */
 function doFastTransform(
   length: number,
   coefs: ComplexArray[],
-  output: ComplexArray
+  real: Float32Array,
+  imag: Float32Array
 ) {
   for (
     let dftSize = 2, coeffBin = 0;
@@ -121,22 +143,25 @@ function doFastTransform(
       for (let i = 0; i < halfDftSize; ++i) {
         const near = dftStart + i;
         const far = near + halfDftSize;
-        const evenReal = output.real[near];
-        const evenImag = output.imag[near];
+        const evenReal = real[near];
+        const evenImag = imag[near];
         const cr = binCoefficients.real[i];
         const ci = binCoefficients.imag[i];
-        const or = output.real[far];
-        const oi = output.imag[far];
+        const or = real[far];
+        const oi = imag[far];
         const oddReal = cr * or - ci * oi;
         const oddImag = cr * oi + ci * or;
-        output.real[near] = evenReal + oddReal;
-        output.imag[near] = evenImag + oddImag;
-        output.real[far] = evenReal - oddReal;
-        output.imag[far] = evenImag - oddImag;
+        real[near] = evenReal + oddReal;
+        imag[near] = evenImag + oddImag;
+        real[far] = evenReal - oddReal;
+        imag[far] = evenImag - oddImag;
       }
     }
   }
 }
+
+/** Array of complex numbers. Real and imaginary parts are separate. */
+type ComplexArray = { real: Float32Array; imag: Float32Array };
 
 /** Builds a triangle of direct and reverse FFT coefficients for the given length. */
 function makeFftCoefficients(length: number): [ComplexArray[], ComplexArray[]] {
