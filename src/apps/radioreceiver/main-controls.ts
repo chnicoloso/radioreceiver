@@ -1,54 +1,33 @@
 import { css, html, LitElement, nothing } from "lit";
-import { customElement, property, state } from "lit/decorators.js";
+import { customElement, property, query, state } from "lit/decorators.js";
+import {
+  getSchemes,
+  hasBandwidth,
+  hasSquelch,
+  hasStereo,
+  type Scheme,
+} from "../../demod/scheme";
 import { RrFrequencyInput } from "../../ui/controls/frequency-input";
+import { RrWindow, WindowDelegate } from "../../ui/controls/window";
 import * as Icons from "../../ui/icons";
+import { BaseStyle } from "../../ui/styles";
 import "../../ui/controls/frequency-input";
 import "../../ui/controls/window";
 
 @customElement("rr-main-controls")
-export class RrMainControls extends LitElement {
+export class RrMainControls extends WindowDelegate(LitElement) {
   static get styles() {
     return [
+      BaseStyle,
       css`
-        :host {
-          font-family: Arial, Helvetica, sans-serif;
-        }
-
-        @media (prefers-color-scheme: dark) {
-          input,
-          select {
-            background: #222;
-            color: #ddd;
-          }
-        }
-
         rr-window {
-          bottom: calc(1em + 24px);
+          right: auto;
           left: 1em;
         }
 
-        rr-window.inline {
-          position: initial;
-          display: inline-block;
-        }
-
-        @media (max-width: 778px) {
-          rr-window {
-            bottom: calc(1em + 48px);
-          }
-        }
-
-        button:has(svg) {
-          padding-inline: 0;
-          width: 24px;
-          height: 24px;
-        }
-
-        button > svg {
-          display: block;
-          width: 16px;
-          height: 16px;
-          margin: auto;
+        .cfgBlock {
+          display: inline-flex;
+          flex-direction: column;
         }
 
         #bandwidth {
@@ -62,6 +41,10 @@ export class RrMainControls extends LitElement {
 
         #stereoIcon.stereo {
           fill: #060;
+        }
+
+        #squelch {
+          width: 12ex;
         }
 
         @media (prefers-color-scheme: dark) {
@@ -91,15 +74,23 @@ export class RrMainControls extends LitElement {
       label="Controls"
       id="controls"
       class=${this.inline ? "inline" : ""}
+      .position=${this.position}
       .fixed=${this.inline}
     >
-      ${this.playing
-        ? html`<button slot="label-left" id="stop" @click=${this.onStop}>
-            ${Icons.Stop}
+      ${this.errorState
+        ? html`<button slot="label-left" id="errorState" disabled>
+            ${Icons.ErrorState}
           </button>`
-        : html`<button slot="label-left" id="start" @click=${this.onStart}>
-            ${Icons.Play}
-          </button>`}
+        : this.playing
+          ? html`<button slot="label-left" id="stop" @click=${this.onStop}>
+              ${Icons.Stop}
+            </button>`
+          : html`<button slot="label-left" id="start" @click=${this.onStart}>
+              ${Icons.Play}
+            </button>`}
+      <button slot="label-right" id="presets" @click=${this.onPresets}>
+        ${Icons.Presets}
+      </button>
       ${this.showSettings
         ? html`<button
             slot="label-right"
@@ -155,38 +146,51 @@ export class RrMainControls extends LitElement {
       <div>
         <label for="scheme">Modulation: </label>
         <select id="scheme" @change=${this.onModeChange}>
-          ${this.availableModes.map(
+          ${this.availableSchemes.map(
             (k) =>
-              html`<option value="${k}" .selected=${this.mode == k}>
+              html`<option value="${k}" .selected=${this.scheme == k}>
                 ${k}
               </option>`
           )}
         </select>
-        <label for="bandwidth" .hidden=${this.mode == "WBFM"}>Bandwidth: </label
-        ><input
-          type="number"
-          id="bandwidth"
-          min="0"
-          max="20000"
-          step="1"
-          .value=${String(this.bandwidth)}
-          .hidden=${this.mode == "WBFM"}
-          @change=${this.onBandwidthChange}
-        />
-        <label for="stereo" .hidden=${this.mode != "WBFM"}>Stereo: </label
-        ><input
-          type="checkbox"
-          id="stereo"
-          .checked=${this.stereo}
-          .hidden=${this.mode != "WBFM"}
-          @change=${this.onStereoChange}
-        />
-        <span
-          id="stereoIcon"
-          class=${this.stereoStatus ? "stereo" : "mono"}
-          .hidden=${this.mode != "WBFM" || !this.stereo}
-          >${Icons.Stereo}</span
-        >
+        <div class="cfgBlock">
+          <span .hidden=${!hasBandwidth(this.scheme)}
+            ><label for="bandwidth">Bandwidth: </label
+            ><input
+              type="number"
+              id="bandwidth"
+              min="0"
+              max="20000"
+              step="1"
+              .value=${String(this.bandwidth)}
+              @change=${this.onBandwidthChange} /></span
+          ><span .hidden=${!hasStereo(this.scheme)}>
+            <label for="stereo">Stereo: </label
+            ><input
+              type="checkbox"
+              id="stereo"
+              .checked=${this.stereo}
+              @change=${this.onStereoChange}
+            />
+            <span
+              id="stereoIcon"
+              class=${this.stereoStatus ? "stereo" : "mono"}
+              .hidden=${!hasStereo(this.scheme) || !this.stereo}
+              >${Icons.Stereo}</span
+            ></span
+          ><span .hidden=${!hasSquelch(this.scheme)}>
+            <label for="squelch">Squelch: </label
+            ><input
+              type="range"
+              id="squelch"
+              min="0"
+              max="6"
+              step="0.1"
+              .value=${String(this.squelch)}
+              @input=${this.onSquelchChange}
+            />
+          </span>
+        </div>
       </div>
       <div>
         <label for="gain">Gain: </label
@@ -216,19 +220,22 @@ export class RrMainControls extends LitElement {
   @property({ attribute: false }) inline: boolean = false;
   @property({ attribute: false }) showSettings: boolean = true;
   @property({ attribute: false }) showHelp: boolean = true;
+  @property({ attribute: false }) errorState: boolean = false;
   @property({ attribute: false }) playing: boolean = false;
   @property({ attribute: false }) scale: number = 1000;
   @property({ attribute: false }) centerFrequency: number = 88500000;
   @property({ attribute: false }) tunedFrequency: number = 88500000;
   @property({ attribute: false }) tuningStep: number = 1000;
-  @property({ attribute: false }) availableModes: string[] = ["WBFM"];
-  @property({ attribute: false }) mode: string = "WBFM";
+  @property({ attribute: false }) availableSchemes: Scheme[] = getSchemes();
+  @property({ attribute: false }) scheme: Scheme = "WBFM";
   @property({ attribute: false }) bandwidth: number = 150000;
   @property({ attribute: false }) stereo: boolean = true;
+  @property({ attribute: false }) squelch: number = 0;
   @property({ attribute: false }) stereoStatus: boolean = false;
   @property({ attribute: false }) gain: number | null = null;
   @property({ attribute: false }) gainDisabled: boolean = false;
   @state() private savedGain: number = 0;
+  @query("rr-window") protected window?: RrWindow;
 
   private onStart() {
     this.dispatchEvent(new StartEvent());
@@ -238,14 +245,17 @@ export class RrMainControls extends LitElement {
     this.dispatchEvent(new StopEvent());
   }
 
+  private onPresets() {
+    this.dispatchEvent(new PresetsEvent());
+  }
+
   private onSettings() {
     this.dispatchEvent(new SettingsEvent());
   }
 
   private onScaleChange(e: Event) {
     let input = e.target as RrFrequencyInput;
-    let scale = input.scale;
-    this.scale = scale;
+    this.scale = input.scale;
     this.dispatchEvent(new ScaleChangedEvent());
   }
 
@@ -273,9 +283,9 @@ export class RrMainControls extends LitElement {
   }
 
   private onModeChange(e: Event) {
-    let value = (e.target as HTMLSelectElement).selectedOptions[0].value;
-    this.mode = value;
-    this.dispatchEvent(new ModeChangedEvent());
+    this.scheme = (e.target as HTMLSelectElement).selectedOptions[0]
+      .value as Scheme;
+    this.dispatchEvent(new SchemeChangedEvent());
   }
 
   private onBandwidthChange(e: Event) {
@@ -291,9 +301,23 @@ export class RrMainControls extends LitElement {
 
   private onStereoChange(e: Event) {
     let target = e.target as HTMLInputElement;
-    let value = target.checked;
-    this.stereo = value;
+    this.stereo = target.checked;
     this.dispatchEvent(new StereoChangedEvent());
+  }
+
+  private onSquelchChange(e: Event) {
+    let target = e.target as HTMLInputElement;
+    let squelch = Number(target.value);
+    if (isNaN(squelch) || squelch < 0) {
+      squelch = 0;
+      target.value = String(squelch);
+    }
+    if (squelch > 6) {
+      squelch = 6;
+      target.value = String(squelch);
+    }
+    this.squelch = squelch;
+    this.dispatchEvent(new SquelchChangedEvent());
   }
 
   private onGainInput(e: Event) {
@@ -309,8 +333,7 @@ export class RrMainControls extends LitElement {
 
   private onGainAutoChange(e: Event) {
     let target = e.target as HTMLInputElement;
-    let auto = target.checked;
-    if (auto) {
+    if (target.checked) {
       if (this.gain != null) this.savedGain = this.gain;
       this.gain = null;
     } else {
@@ -329,6 +352,12 @@ class StartEvent extends Event {
 class StopEvent extends Event {
   constructor() {
     super("rr-stop", { bubbles: true, composed: true });
+  }
+}
+
+class PresetsEvent extends Event {
+  constructor() {
+    super("rr-presets", { bubbles: true, composed: true });
   }
 }
 
@@ -362,9 +391,9 @@ class TuningStepChangedEvent extends Event {
   }
 }
 
-class ModeChangedEvent extends Event {
+class SchemeChangedEvent extends Event {
   constructor() {
-    super("rr-mode-changed", { bubbles: true, composed: true });
+    super("rr-scheme-changed", { bubbles: true, composed: true });
   }
 }
 
@@ -380,6 +409,12 @@ class StereoChangedEvent extends Event {
   }
 }
 
+class SquelchChangedEvent extends Event {
+  constructor() {
+    super("rr-squelch-changed", { bubbles: true, composed: true });
+  }
+}
+
 class GainChangedEvent extends Event {
   constructor() {
     super("rr-gain-changed", { bubbles: true, composed: true });
@@ -390,14 +425,16 @@ declare global {
   interface HTMLElementEventMap {
     "rr-start": StartEvent;
     "rr-stop": StopEvent;
+    "rr-presets": PresetsEvent;
     "rr-settings": SettingsEvent;
     "rr-scale-changed": ScaleChangedEvent;
     "rr-center-frequency-changed": CenterFrequencyChangedEvent;
     "rr-tuned-frequency-changed": TunedFrequencyChangedEvent;
     "rr-tuning-step-changed": TuningStepChangedEvent;
-    "rr-mode-changed": ModeChangedEvent;
+    "rr-scheme-changed": SchemeChangedEvent;
     "rr-bandwidth-changed": BandwidthChangedEvent;
     "rr-stereo-changed": StereoChangedEvent;
+    "rr-squelch-changed": SquelchChangedEvent;
     "rr-gain-changed": GainChangedEvent;
   }
 }

@@ -16,7 +16,7 @@
 
 import { U8ToFloat32 } from "../dsp/converters";
 import { RadioError, RadioErrorType } from "../errors";
-import { RtlDevice, RtlDeviceProvider } from "../rtlsdr/rtldevice";
+import { DirectSampling, RtlDevice, RtlDeviceProvider } from "../rtlsdr/rtldevice";
 import { Channel } from "./msgqueue";
 import { SampleReceiver } from "./sample_receiver";
 
@@ -27,7 +27,8 @@ type Message =
   | { type: "frequency"; value: number }
   | { type: "frequencyCorrection"; value: number }
   | { type: "gain"; value: number | null }
-  | { type: "directSamplingEnabled"; value: boolean };
+  | { type: "directSamplingMethod"; value: DirectSampling }
+  | { type: "biasTeeEnabled"; value: boolean };
 
 /** The information in a 'radio' event. */
 export type RadioEventType =
@@ -63,7 +64,8 @@ export class Radio extends EventTarget {
     this.frequencyCorrection = 0;
     this.gain = null;
     this.frequency = 88500000;
-    this.directSamplingEnabled = false;
+    this.directSamplingMethod = DirectSampling.Off;
+    this.biasTeeEnabled = false;
     this.runLoop();
   }
 
@@ -78,7 +80,9 @@ export class Radio extends EventTarget {
   /** Currently tuned frequency. */
   private frequency: number;
   /** Whether direct sampling mode is enabled. */
-  private directSamplingEnabled: boolean;
+  private directSamplingMethod: DirectSampling;
+  /** Whether the bias tee is enabled. */
+  private biasTeeEnabled: boolean;
 
   /** Starts playing the radio. */
   start() {
@@ -131,14 +135,14 @@ export class Radio extends EventTarget {
     return this.gain;
   }
 
-  /** Enables or disables direct sampling mode. */
-  enableDirectSampling(enable: boolean) {
-    this.channel.send({ type: "directSamplingEnabled", value: enable });
+  /** Sets the direct sampling method. */
+  setDirectSamplingMethod(method: DirectSampling) {
+    this.channel.send({ type: "directSamplingMethod", value: method });
   }
 
-  /** Returns whether direct sampling mode is enabled. */
-  isDirectSamplingEnabled(): boolean {
-    return this.directSamplingEnabled;
+  /** Returns the current direct sampling method. */
+  getDirectSamplingMethod(): DirectSampling {
+    return this.directSamplingMethod;
   }
 
   /** Changes the sample rate. This change only takes effect when the radio is started. */
@@ -151,6 +155,16 @@ export class Radio extends EventTarget {
     return this.sampleRate;
   }
 
+  /** Enables or disables the bias tee. */
+  enableBiasTee(enable: boolean) {
+    this.channel.send({ type: "biasTeeEnabled", value: enable });
+  }
+
+  /** Returns whether the bias tee is enabled. */
+  isBiasTeeEnabled(): boolean {
+    return this.biasTeeEnabled;
+  }
+
   /** Runs the state machine. */
   private async runLoop() {
     let transfers: Transfers;
@@ -160,30 +174,19 @@ export class Radio extends EventTarget {
       try {
         switch (this.state) {
           case State.OFF: {
-            if (msg.type == "frequency" && this.frequency != msg.value) {
-              this.frequency = msg.value;
-            }
-            if (
-              msg.type == "frequencyCorrection" &&
-              this.frequencyCorrection != msg.value
-            ) {
+            if (msg.type == "frequency") this.frequency = msg.value;
+            if (msg.type == "frequencyCorrection")
               this.frequencyCorrection = msg.value;
-            }
-            if (msg.type == "gain" && this.gain != msg.value) {
-              this.gain = msg.value;
-            }
-            if (
-              msg.type == "directSamplingEnabled" &&
-              this.directSamplingEnabled != msg.value
-            ) {
-              this.directSamplingEnabled = msg.value;
-            }
+            if (msg.type == "gain") this.gain = msg.value;
+            if (msg.type == "directSamplingMethod")
+              this.directSamplingMethod = msg.value;
+            if (msg.type == "biasTeeEnabled") this.biasTeeEnabled = msg.value;
             if (msg.type != "start") continue;
             rtl = await this.rtlProvider.get();
             await rtl.setSampleRate(this.sampleRate);
             await rtl.setFrequencyCorrection(this.frequencyCorrection);
             await rtl.setGain(this.gain);
-            await rtl.enableDirectSampling(this.directSamplingEnabled);
+            await rtl.setDirectSamplingMethod(this.directSamplingMethod);
             await rtl.setCenterFrequency(this.frequency);
             await rtl.resetBuffer();
             transfers = new Transfers(
@@ -217,10 +220,16 @@ export class Radio extends EventTarget {
                   await rtl!.setFrequencyCorrection(this.frequencyCorrection);
                 }
                 break;
-              case "directSamplingEnabled":
-                if (this.directSamplingEnabled != msg.value) {
-                  this.directSamplingEnabled = msg.value;
-                  await rtl!.enableDirectSampling(this.directSamplingEnabled);
+              case "directSamplingMethod":
+                if (this.directSamplingMethod != msg.value) {
+                  this.directSamplingMethod = msg.value;
+                  await rtl!.setDirectSamplingMethod(this.directSamplingMethod);
+                }
+                break;
+              case "biasTeeEnabled":
+                if (this.biasTeeEnabled != msg.value) {
+                  this.biasTeeEnabled = msg.value;
+                  await rtl!.enableBiasTee(this.biasTeeEnabled);
                 }
                 break;
               case "stop":
@@ -315,6 +324,7 @@ class Transfers {
    * @returns a promise that resolves when the stream is stopped.
    */
   async stopStream(): Promise<void> {
+    if (this.buffersRunning == 0 && this.buffersWanted == 0) return;
     let promise = new Promise<void>((r) => {
       this.stopCallback = r;
     });
@@ -323,10 +333,10 @@ class Transfers {
   }
 
   /** Runs the transfer stream. */
-  private readStream() {
-    this.rtl
-      .readSamples(this.samplesPerBuf)
-      .then((b) => {
+  private async readStream(): Promise<void> {
+    try {
+      while (this.buffersRunning <= this.buffersWanted) {
+        const b = await this.rtl.readSamples(this.samplesPerBuf);
         let [I, Q] = this.iqConverter.convert(b.data);
         this.sampleReceiver.receiveSamples(I, Q, b.frequency);
         if (this.directSampling != b.directSampling) {
@@ -338,22 +348,21 @@ class Transfers {
             })
           );
         }
-        if (this.buffersRunning <= this.buffersWanted) return this.readStream();
-        --this.buffersRunning;
-        if (this.buffersRunning == 0) {
-          this.stopCallback();
-          this.stopCallback = Transfers.nilCallback;
-        }
-      })
-      .catch((e) => {
-        let error = new RadioError(
-          "Sample transfer was interrupted. Did you unplug your device?",
-          RadioErrorType.UsbTransferError,
-          { cause: e }
-        );
-        let event = new RadioEvent({ type: "error", exception: error });
-        this.radio.dispatchEvent(event);
-      });
+      }
+    } catch (e) {
+      let error = new RadioError(
+        "Sample transfer was interrupted. Did you unplug your device?",
+        RadioErrorType.UsbTransferError,
+        { cause: e }
+      );
+      let event = new RadioEvent({ type: "error", exception: error });
+      this.radio.dispatchEvent(event);
+    }
+    --this.buffersRunning;
+    if (this.buffersRunning == 0) {
+      this.stopCallback();
+      this.stopCallback = Transfers.nilCallback;
+    }
   }
 
   static nilCallback() {}

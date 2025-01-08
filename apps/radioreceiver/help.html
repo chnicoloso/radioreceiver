@@ -66,9 +66,9 @@
       among others.
     </p>
     <p>
-      Radio Receiver can demodulate stereo FM, AM, narrowband FM, USB, and LSB.
-      It has adjustable bandwidth filters so you can also listen to Morse code
-      transmissions or challenging, distant stations.
+      Radio Receiver can demodulate stereo FM, AM, narrowband FM, USB, LSB, and
+      CW. It has adjustable bandwidth filters so you can also listen to Morse
+      code transmissions or challenging, distant stations.
     </p>
     <p>
       Radio Receiver was written by
@@ -192,8 +192,8 @@
       There are many modulation schemes. You have probably heard of FM and AM,
       which stand for “frequency modulation” and “amplitude modulation”, but
       there are many others. Radio Receiver can demodulate commercial FM and AM,
-      and also narrowband FM (used in 2-way radios and weather radio), USB, and
-      LSB (used in amateur radio.)
+      and also narrowband FM (used in 2-way radios and weather radio), USB and
+      LSB (used in amateur radio), and CW (used for Morse code.)
     </p>
 
     <h2 id="decibels">Decibels</h2>
@@ -247,11 +247,9 @@
     </p>
     <p>
       Radio Receiver supports sticks that have direct sampling mode and the
-      RTL-SDR Blog V4 with its internal upconverter. It doesn't have explicit
-      support for external upconverters, but you can use one by tuning into the
-      modified frequency; so if your upconverter raises frequencies by 100 MHz
-      and you want to receive an AM station on 830 kHz, you would tune into
-      100830 kHz.
+      RTL-SDR Blog V4 with its internal upconverter. It also supports external
+      upconverters, with an option to use the bias T, if present, to turn the
+      upconverter on and off automatically depending on the tuned frequency.
     </p>
 
     <h1 id="how_to_use">How to use Radio Receiver</h1>
@@ -384,7 +382,9 @@
     </p>
 
     <p>
-      Press the “settings” button
+      Press the “presets” button
+      <rr-demo-button name="presets"></rr-demo-button> to open the
+      <a href="#presets">presets window</a>, and the “settings” button
       <rr-demo-button name="settings"></rr-demo-button> to open the
       <a href="#settings">settings window</a>.
     </p>
@@ -431,15 +431,25 @@
     <p>
       The next line lets you select a modulation scheme for the signal. You can
       choose between wideband FM (WBFM, used in commercial radio), narrowband FM
-      (NBFM), AM, upper sideband (USB), and lower sideband (LSB). You need to
-      match the modulation scheme to the signal you are receiving; otherwise,
-      you'll only hear noise or gibberish.
+      (NBFM), AM, upper sideband (USB), lower sideband (LSB), and continuous
+      wave (CW). You need to match the modulation scheme to the signal you are
+      receiving; otherwise, you'll only hear noise or gibberish.
     </p>
+
+    <rr-demo-controls scheme="AM"></rr-demo-controls>
+
     <p>
       You can also select a bandwidth for all schemes except WBFM. You generally
       need to match the bandwidth to the received signal, but you may sometimes
       need to use a reduced bandwidth if there are interfering signals near the
       one you are interested in.
+    </p>
+    <p>
+      The squelch control mutes the radio automatically when there isn't a
+      signal. This lets you monitor a channel that's used infrequently without
+      having to hear noise all the time. By setting the value of the squelch
+      control, you decide how strong the signal needs to be to unmute your
+      radio.
     </p>
     <p>
       For WBFM, you can enable and disable stereo reception. When stereo
@@ -526,6 +536,42 @@
       selected frequency unit (Hz, kHz, or MHz.)
     </p>
 
+    <h2 id="presets">The presets window</h2>
+
+    <rr-demo-presets></rr-demo-presets>
+
+    <p>
+      You can open the presets window by clicking the presets button
+      <rr-demo-button name="presets"></rr-demo-button> in the main controls
+      window.
+    </p>
+
+    <p>
+      This window shows a list of saved stations and frequencies with their
+      names and modulation scheme. Click on any of them to switch to it.
+    </p>
+
+    <p>
+      Use the “add” button <rr-demo-button name="add"></rr-demo-button> to add
+      the currently-tuned station to the presets list. Click on the “edit”
+      <rr-demo-icon name="edit"></rr-demo-icon> and “delete”
+      <rr-demo-icon name="delete"></rr-demo-icon> icons in each row to edit and
+      delete that row, respectively.
+    </p>
+
+    <p>
+      Click on the table headings (“Name”, “Frequency”, and “Mode”) to sort the
+      table by the values in that column. If you click again in the same
+      heading, the ordering will flip between first-to-last and last-to-first.
+    </p>
+
+    <p>
+      You can resize the presets window by dragging the lines on the right and
+      bottom edges of the window, or the double arrow on the bottom right
+      corner. In this way, you can have it always open where it doesn't get in
+      the way.
+    </p>
+
     <h2 id="settings">The settings window</h2>
 
     <rr-demo-settings></rr-demo-settings>
@@ -556,6 +602,39 @@
       The “FFT size” setting lets you change the resolution of the spectrum
       display. Higher values result in more detailed spectra, at the cost of
       more processing power.
+    </p>
+
+    <p>
+      The “bias T” is a circuit that exists in some RTL-SDR sticks, which can
+      power an external device through the antenna connection. When you check
+      this setting, you enable the bias T in your stick, if it has one.
+    </p>
+
+    <p>
+      The “0-29MHz method” setting lets you select what Radio Receiver will do
+      when you try to tune into a frequency lower than 28.8 MHz:
+    </p>
+    <ul>
+      <li>
+        The “default method” setting tries to use the stick's internal
+        upconverter, if it has one.
+      </li>
+      <li>
+        The “direct sampling” method enables the stick's direct sampling mode,
+        if available. You can select the variant of direct sampling that your
+        stick uses through the “direct sampling channel” setting.
+      </li>
+      <li>
+        The “external upconverter” method makes the stick tune into the
+        upconverter's frequency range. The “use bias T for upconverter” lets you
+        turn the upconverter on automatically if it's powered by your stick's
+        bias T.
+      </li>
+    </ul>
+    <p>
+      (Note that the “direct sampling” setting has no effect on RTL-SDR Blog V4
+      sticks. Those will always use the default method or the external
+      upconverter.)
     </p>
   </body>
 </html>

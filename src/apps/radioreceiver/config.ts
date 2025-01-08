@@ -48,10 +48,10 @@ function blankConfig(): RawConfig {
     v1: {
       modes: {
         WBFM: { scheme: "WBFM", stereo: true },
-        NBFM: { scheme: "NBFM", maxF: 5000 },
-        AM: { scheme: "AM", bandwidth: 15000 },
-        LSB: { scheme: "LSB", bandwidth: 2800 },
-        USB: { scheme: "USB", bandwidth: 2800 },
+        NBFM: { scheme: "NBFM", maxF: 5000, squelch: 0 },
+        AM: { scheme: "AM", bandwidth: 15000, squelch: 0 },
+        LSB: { scheme: "LSB", bandwidth: 2800, squelch: 0 },
+        USB: { scheme: "USB", bandwidth: 2800, squelch: 0 },
         CW: { scheme: "CW", bandwidth: 50 },
       },
       mode: "WBFM",
@@ -63,8 +63,24 @@ function blankConfig(): RawConfig {
       sampleRate: 1024000,
       ppm: 0,
       fftSize: 2048,
+      biasTee: false,
+      lowFrequencyMethod: {
+        name: "directSampling",
+        channel: "Q",
+        frequency: 100000000,
+        biasTee: false,
+      },
       minDecibels: -90,
       maxDecibels: -20,
+      presets: {
+        sortColumn: "frequency",
+        list: [],
+      },
+      windows: {
+        controls: {},
+        settings: {},
+        presets: {},
+      },
     },
   };
 }
@@ -101,17 +117,83 @@ type ConfigV1 = {
   ppm: number;
   /** Size of the spectrum display. */
   fftSize: number;
+  /** Whether the bias tee is enabled. */
+  biasTee: boolean;
+  /** The method for receiving 0-29 MHz signals. */
+  lowFrequencyMethod: ConfigV1LowFrequencyMethod;
   /** Minimum number of decibels for scope. */
   minDecibels: number;
   /** Maximum number of decibels for scope. */
   maxDecibels: number;
+  /** Presets. */
+  presets: ConfigV1Presets;
+  /** Window configurations. */
+  windows: {
+    [k in ConfigV1WindowName]: ConfigV1Window;
+  };
+};
+
+/** Names of the windows whose configurations can be saved. */
+type ConfigV1WindowName = "controls" | "settings" | "presets";
+
+/** Window configuration. */
+type ConfigV1Window = {
+  /** Whether the window is visible. */
+  open?: boolean;
+  /** Window's position on the screen. */
+  position?: ConfigV1WindowPosition;
+  /** Window's size. */
+  size?: ConfigV1WindowSize;
+};
+
+/** Window position. */
+type ConfigV1WindowPosition = {
+  top: number;
+  left: number;
+  bottom: number;
+  right: number;
+};
+
+/** Window size. */
+type ConfigV1WindowSize = {
+  width: number;
+  height: number;
 };
 
 /** This definition parallels the Mode from scheme.ts */
 type ConfigV1Mode =
   | { scheme: "WBFM"; stereo: boolean }
-  | { scheme: "NBFM"; maxF: number }
-  | { scheme: "AM"; bandwidth: number }
-  | { scheme: "USB"; bandwidth: number }
-  | { scheme: "LSB"; bandwidth: number }
+  | { scheme: "NBFM"; maxF: number; squelch: number }
+  | { scheme: "AM"; bandwidth: number; squelch: number }
+  | { scheme: "USB"; bandwidth: number; squelch: number }
+  | { scheme: "LSB"; bandwidth: number; squelch: number }
   | { scheme: "CW"; bandwidth: number };
+
+type ConfigV1Scheme = ConfigV1Mode["scheme"];
+
+/** This definition parallels the LowFrequencyMethod from settings.ts */
+type ConfigV1LowFrequencyMethod = {
+  name: "default" | "directSampling" | "upconverter";
+  channel: "Q" | "I";
+  frequency: number;
+  biasTee: boolean;
+};
+
+/** Configuration and content of the presets. */
+type ConfigV1Presets = {
+  sortColumn: string;
+  list: ConfigV1Preset[];
+};
+
+/** This definition parallels the Preset from presets.ts */
+type ConfigV1Preset = {
+  name: string;
+  tunedFrequency: number;
+  scale: number;
+  tuningStep: number;
+  scheme: ConfigV1Scheme;
+  bandwidth: number;
+  stereo: boolean;
+  squelch: number;
+  gain: number | null;
+};

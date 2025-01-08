@@ -1,14 +1,24 @@
-import { css, html, LitElement } from "lit";
+import { css, html, LitElement, PropertyValues } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
+import {
+  getBandwidth,
+  getMode,
+  getSquelch,
+  getStereo,
+  type Mode,
+  type Scheme,
+} from "../../demod/scheme";
 import * as Icons from "../../ui/icons";
 import { RrScope } from "../../ui/spectrum/scope";
 import { RrSpectrum } from "../../ui/spectrum/spectrum";
 import { type GridSelection } from "../../ui/spectrum/types";
 import { RrWaterfall } from "../../ui/spectrum/waterfall";
+import { RrMainControls } from "../radioreceiver/main-controls";
 import "../../ui/spectrum/scope";
 import "../../ui/spectrum/spectrum";
 import "../../ui/spectrum/waterfall";
 import "../radioreceiver/main-controls";
+import "../radioreceiver/presets";
 import "../radioreceiver/settings";
 
 abstract class DemoSpectrumWidget extends LitElement {
@@ -221,10 +231,28 @@ export class RrDemoControls extends LitElement {
         .inline=${true}
         .showHelp=${false}
         .centerFrequency=${93900000}
-        .bandwidth=${150000}
         .frequencyScale=${1000000}
+        .scheme=${this.mode.scheme}
+        .bandwidth=${getBandwidth(this.mode)}
+        .stereo=${getStereo(this.mode)}
+        .stereoStatus=${true}
+        .squelch=${getSquelch(this.mode)}
+        @rr-scheme-changed=${this.onSchemeChanged}
       ></rr-main-controls>
     </div>`;
+  }
+
+  @property({ type: String, reflect: true }) scheme: Scheme = "WBFM";
+  @state() mode: Mode = getMode(this.scheme);
+
+  private onSchemeChanged(e: Event) {
+    this.scheme = (e.target as RrMainControls).scheme as Scheme;
+  }
+
+  protected willUpdate(changed: PropertyValues): void {
+    if (changed.has("scheme")) {
+      this.mode = getMode(this.scheme);
+    }
   }
 }
 
@@ -255,6 +283,97 @@ export class RrDemoSettings extends LitElement {
   }
 }
 
+@customElement("rr-demo-presets")
+export class RrDemoPresets extends LitElement {
+  static get styles() {
+    return [
+      css`
+        :host {
+          display: block;
+        }
+
+        #container {
+          position: relative;
+          width: 100%;
+        }
+
+        rr-presets {
+          height: 100%;
+        }
+      `,
+    ];
+  }
+
+  render() {
+    return html`<div id="container">
+      <rr-presets
+        id="presets"
+        .inline=${true}
+        .presets=${[
+          {
+            name: "Rock & Roll FM station",
+            tunedFrequency: 89700000,
+            scale: 1000000,
+            tuningStep: 100000,
+            scheme: "WBFM" as "WBFM",
+            bandwidth: 150000,
+            stereo: true,
+            squelch: 0,
+            gain: 30,
+          },
+          {
+            name: "Talk Radio AM",
+            tunedFrequency: 1200000,
+            scale: 1000,
+            tuningStep: 10000,
+            scheme: "AM" as "AM",
+            bandwidth: 10000,
+            stereo: false,
+            squelch: 0,
+            gain: 30,
+          },
+          {
+            name: "Frequency standard",
+            tunedFrequency: 10000000,
+            scale: 1,
+            tuningStep: 10000,
+            scheme: "AM" as "AM",
+            bandwidth: 10000,
+            stereo: false,
+            squelch: 0,
+            gain: 30,
+          },
+          {
+            name: "Ham radio net",
+            tunedFrequency: 14300000,
+            scale: 1000,
+            tuningStep: 1000,
+            scheme: "USB" as "USB",
+            bandwidth: 2800,
+            stereo: false,
+            squelch: 0,
+            gain: 30,
+          },
+        ]}
+      ></rr-presets>
+    </div>`;
+  }
+}
+
+const ICONS = new Map([
+  ["play", Icons.Play],
+  ["stop", Icons.Stop],
+  ["add", Icons.Add],
+  ["edit", Icons.Edit],
+  ["delete", Icons.Delete],
+  ["presets", Icons.Presets],
+  ["settings", Icons.Settings],
+  ["zoom-in", Icons.ZoomIn],
+  ["zoom-out", Icons.ZoomOut],
+  ["scroll-left", Icons.ScrollLeft],
+  ["scroll-right", Icons.ScrollRight],
+]);
+
 @customElement("rr-demo-button")
 export class RrDemoButton extends LitElement {
   static get styles() {
@@ -282,18 +401,36 @@ export class RrDemoButton extends LitElement {
   }
 
   render() {
-    return html`<button>${RrDemoButton.BUTTONS.get(this.name)}</button>`;
+    return html`<button>${ICONS.get(this.name)}</button>`;
   }
 
-  static BUTTONS = new Map([
-    ["play", Icons.Play],
-    ["stop", Icons.Stop],
-    ["settings", Icons.Settings],
-    ["zoom-in", Icons.ZoomIn],
-    ["zoom-out", Icons.ZoomOut],
-    ["scroll-left", Icons.ScrollLeft],
-    ["scroll-right", Icons.ScrollRight],
-  ]);
+  @property({ type: String, reflect: true }) name: string = "play";
+}
+
+@customElement("rr-demo-icon")
+export class RrDemoIcon extends LitElement {
+  static get styles() {
+    return [
+      css`
+        :host {
+          display: inline-block;
+          vertical-align: middle;
+          margin-top: -2px;
+          margin-bottom: -2px;
+        }
+        button > svg {
+          display: inline-block;
+          width: 16px;
+          height: 16px;
+          margin: auto;
+        }
+      `,
+    ];
+  }
+
+  render() {
+    return html`${ICONS.get(this.name)}`;
+  }
 
   @property({ type: String, reflect: true }) name: string = "play";
 }

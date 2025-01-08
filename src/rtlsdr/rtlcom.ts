@@ -28,7 +28,15 @@ export class RtlCom {
 
   /** Claims the USB control interface. */
   async claimInterface() {
-    await this.device.claimInterface(0);
+    try {
+      await this.device.claimInterface(0);
+    } catch (e) {
+      throw new RadioError(
+        "Could not connect to the RTL-SDR stick. Are you using it in another application?",
+        RadioErrorType.UsbTransferError,
+        { cause: e }
+      );
+    }
   }
 
   /** Releases the USB control interface. */
@@ -132,6 +140,7 @@ export class RtlCom {
   }
 
   async setGpioOutput(gpio: number) {
+    gpio = 1 << gpio;
     let r = await this.getSysReg(0x3004);
     await this.setSysReg(0x3004, r & ~gpio);
     r = await this.getSysReg(0x3003);
@@ -139,8 +148,9 @@ export class RtlCom {
   }
 
   async setGpioBit(gpio: number, val: number) {
+    gpio = 1 << gpio;
     let r = await this.getSysReg(0x3001);
-    r = val ? (r | gpio) : (r & ~gpio);
+    r = val ? r | gpio : r & ~gpio;
     await this.setSysReg(0x3001, r);
   }
 

@@ -1,11 +1,28 @@
-import { css, html, LitElement } from "lit";
+import { css, html, LitElement, PropertyValues } from "lit";
 import { customElement, query, state } from "lit/decorators.js";
 import { ConfigProvider, loadConfig } from "./config";
+import {
+  Preset,
+  PresetsChangedEvent,
+  PresetSelectedEvent,
+  PresetsSortedEvent,
+  RrPresets,
+} from "./presets";
 import { RrMainControls } from "./main-controls";
-import { RrSettings } from "./settings";
+import { type LowFrequencyMethod, RrSettings } from "./settings";
 import { Demodulator, StereoStatusEvent } from "../../demod/demodulator";
 import { SampleClickEvent, SampleCounter } from "../../demod/sample-counter";
-import { type Mode } from "../../demod/scheme";
+import {
+  getBandwidth,
+  getMode,
+  getSchemes,
+  getSquelch,
+  getStereo,
+  withBandwidth,
+  withSquelch,
+  withStereo,
+  type Mode,
+} from "../../demod/scheme";
 import { Spectrum } from "../../demod/spectrum";
 import { Float32Buffer } from "../../dsp/buffers";
 import { RadioErrorType } from "../../errors";
@@ -18,16 +35,27 @@ import {
   ToneGenerator,
 } from "../../rtlsdr/fakertl/generators";
 import { RTL2832U_Provider } from "../../rtlsdr/rtl2832u";
-import { RtlDeviceProvider } from "../../rtlsdr/rtldevice";
+import { DirectSampling, RtlDeviceProvider } from "../../rtlsdr/rtldevice";
+import {
+  CreateWindowRegistry,
+  RrWindow,
+  WindowClosedEvent,
+  WindowMovedEvent,
+  WindowPosition,
+  WindowResizedEvent,
+  WindowSize,
+} from "../../ui/controls/window";
 import {
   SpectrumDecibelRangeChangedEvent,
   SpectrumDragEvent,
   SpectrumHighlightChangedEvent,
   SpectrumTapEvent,
 } from "../../ui/spectrum/events";
+import { BaseStyle } from "../../ui/styles";
 import { RrSpectrum } from "../../ui/spectrum/spectrum";
 import "./main-controls";
 import "./settings";
+import "./presets";
 import "../../ui/spectrum/spectrum";
 
 type Frequency = {
@@ -37,14 +65,13 @@ type Frequency = {
   rightBand: number;
 };
 
-const DefaultModes: Array<Mode> = [
-  { scheme: "WBFM", stereo: true },
-  { scheme: "NBFM", maxF: 5000 },
-  { scheme: "AM", bandwidth: 15000 },
-  { scheme: "LSB", bandwidth: 2800 },
-  { scheme: "USB", bandwidth: 2800 },
-  { scheme: "CW", bandwidth: 50 },
-];
+type WindowState = {
+  [k in "controls" | "settings" | "presets"]: {
+    open?: boolean;
+    position?: WindowPosition;
+    size?: WindowSize;
+  };
+};
 
 const FAKE_RTL = false;
 
@@ -64,9 +91,9 @@ function getRtlProvider(): RtlDeviceProvider {
 export class RadioReceiverMain extends LitElement {
   static get styles() {
     return [
+      BaseStyle,
       css`
         :host {
-          font-family: Arial, Helvetica, sans-serif;
           height: 100%;
           display: flex;
           flex-direction: column;
@@ -118,46 +145,77 @@ export class RadioReceiverMain extends LitElement {
       ></rr-spectrum>
 
       <rr-main-controls
+        .position=${this.windowState.controls.position}
         .playing=${this.playing}
+        .errorState=${this.errorState}
         .centerFrequency=${this.frequency.center}
         .tunedFrequency=${this.frequency.center + this.frequency.offset}
         .tuningStep=${this.tuningStep}
         .scale=${this.scale}
-        .availableModes=${[...this.availableModes.keys()]}
-        .mode=${this.mode.scheme}
-        .bandwidth=${this.mode.scheme == "WBFM"
-          ? 150000
-          : this.mode.scheme == "NBFM"
-            ? this.mode.maxF * 2
-            : this.mode.bandwidth}
-        .stereo=${this.mode.scheme == "WBFM" ? this.mode.stereo : false}
+        .availableModes=${getSchemes()}
+        .scheme=${this.mode.scheme}
+        .bandwidth=${getBandwidth(this.mode)}
+        .stereo=${getStereo(this.mode)}
+        .squelch=${getSquelch(this.mode)}
         .stereoStatus=${this.stereoStatus}
         .gain=${this.gain}
         .gainDisabled=${this.gainDisabled}
         @rr-start=${this.onStart}
         @rr-stop=${this.onStop}
+        @rr-presets=${this.onPresets}
         @rr-settings=${this.onSettings}
         @rr-scale-changed=${this.onScaleChange}
         @rr-center-frequency-changed=${this.onCenterFrequencyChange}
         @rr-tuned-frequency-changed=${this.onTunedFrequencyChange}
         @rr-tuning-step-changed=${this.onTuningStepChange}
-        @rr-mode-changed=${this.onSchemeChange}
+        @rr-scheme-changed=${this.onSchemeChange}
         @rr-bandwidth-changed=${this.onBandwidthChange}
         @rr-stereo-changed=${this.onStereoChange}
+        @rr-squelch-changed=${this.onSquelchChange}
         @rr-gain-changed=${this.onGainChange}
+        @rr-window-moved=${this.onWindowMoved}
       ></rr-main-controls>
 
       <rr-settings
-        .hidden=${!this.settingsVisible}
+        .closed=${!this.windowState.settings.open}
+        .position=${this.windowState.settings.position}
         .playing=${this.playing}
         .sampleRate=${this.sampleRate}
         .ppm=${this.ppm}
         .fftSize=${this.fftSize}
+        .biasTee=${this.biasTee}
+        .lowFrequencyMethod=${this.lowFrequencyMethod}
         @rr-sample-rate-changed=${this.onSampleRateChange}
         @rr-ppm-changed=${this.onPpmChange}
         @rr-fft-size-changed=${this.onFftSizeChange}
-        @rr-window-closed=${this.onSettingsClosed}
-      ></rr-settings>`;
+        @rr-bias-tee-changed=${this.onBiasTeeChange}
+        @rr-low-frequency-method-changed=${this.onLowFrequencyMethodChange}
+        @rr-window-moved=${this.onWindowMoved}
+        @rr-window-closed=${this.onWindowClosed}
+      ></rr-settings>
+
+      <rr-presets
+        .closed=${!this.windowState.presets.open}
+        .size=${this.windowState.presets.size}
+        .position=${this.windowState.presets.position}
+        .tunedFrequency=${this.frequency.center + this.frequency.offset}
+        .tuningStep=${this.tuningStep}
+        .scale=${this.scale}
+        .availableModes=${getSchemes()}
+        .scheme=${this.mode.scheme}
+        .bandwidth=${getBandwidth(this.mode)}
+        .stereo=${getStereo(this.mode)}
+        .squelch=${getSquelch(this.mode)}
+        .gain=${this.gain}
+        .presets=${this.presets}
+        .sortColumn=${this.presetSortColumn}
+        @rr-preset-selected=${this.onPresetSelected}
+        @rr-presets-changed=${this.onPresetsChanged}
+        @rr-presets-sorted=${this.onPresetsSorted}
+        @rr-window-moved=${this.onWindowMoved}
+        @rr-window-resized=${this.onWindowResized}
+        @rr-window-closed=${this.onWindowClosed}
+      ></rr-presets>`;
   }
 
   private configProvider: ConfigProvider;
@@ -166,19 +224,19 @@ export class RadioReceiverMain extends LitElement {
   private demodulator: Demodulator;
   private sampleCounter: SampleCounter;
   private radio: Radio;
-  private availableModes = new Map(
-    DefaultModes.map((s) => [s.scheme as string, { ...s } as Mode])
-  );
+  private availableModes = new Map(getSchemes().map((s) => [s, getMode(s)]));
   private centerFrequencyScroller?: CenterFrequencyScroller;
 
   @state() private sampleRate: number = 1024000;
   @state() private ppm: number = 0;
   @state() private fftSize: number = 2048;
+  @state() private biasTee: boolean = false;
   @state() private bandwidth: number = this.sampleRate;
   @state() private stereoStatus: boolean = false;
   @state() private minDecibels: number = -90;
   @state() private maxDecibels: number = -20;
   @state() private playing: boolean = false;
+  @state() private errorState: boolean = false;
   @state() private scale: number = 1000;
   @state() private frequency: Frequency = {
     center: 88500000,
@@ -190,9 +248,25 @@ export class RadioReceiverMain extends LitElement {
   @state() private mode: Mode = this.availableModes.get("WBFM")!;
   @state() private gain: number | null = null;
   @state() private gainDisabled: boolean = false;
-  @state() private settingsVisible: boolean = false;
+  @state() private lowFrequencyMethod: LowFrequencyMethod = {
+    name: "default",
+    channel: "Q",
+    frequency: 100000000,
+    biasTee: false,
+  };
+  @state() private windowState: WindowState = {
+    controls: { position: undefined },
+    settings: { open: false, position: undefined },
+    presets: { open: false, position: undefined, size: undefined },
+  };
+  @state() private presetSortColumn: string = "frequency";
+  @state() private presets: Preset[] = [];
 
   @query("#spectrum") private spectrumView?: RrSpectrum;
+  @query("rr-main-controls") private mainControlsWindow?: RrMainControls;
+  @query("rr-settings") private settingsWindow?: RrSettings;
+  @query("rr-presets") private presetsWindow?: RrPresets;
+  private resizeObserver?: ResizeObserver;
 
   constructor() {
     super();
@@ -208,13 +282,6 @@ export class RadioReceiverMain extends LitElement {
       this.sampleRate
     );
 
-    this.applyConfig();
-
-    this.radio.enableDirectSampling(true);
-    this.radio.setFrequencyCorrection(this.ppm);
-    this.radio.setFrequency(this.frequency.center);
-    this.radio.setGain(this.gain);
-
     this.demodulator.setVolume(1);
     this.demodulator.setMode(this.mode);
     this.demodulator.addEventListener("stereo-status", (e) =>
@@ -227,6 +294,22 @@ export class RadioReceiverMain extends LitElement {
     );
   }
 
+  connectedCallback(): void {
+    super.connectedCallback();
+    this.resizeObserver = new ResizeObserver(() => this.onScreenResize());
+    this.resizeObserver.observe(document.body);
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.resizeObserver?.disconnect();
+  }
+
+  protected firstUpdated(changed: PropertyValues): void {
+    super.firstUpdated(changed);
+    this.applyConfig();
+  }
+
   private applyConfig() {
     let cfg = this.configProvider.get();
     for (let modeName of this.availableModes.keys()) {
@@ -237,6 +320,7 @@ export class RadioReceiverMain extends LitElement {
       this.availableModes.set(modeName, mode);
       if (modeName == cfg.mode) this.setMode(mode);
     }
+    this.setLowFrequencyMethod(cfg.lowFrequencyMethod);
     this.setCenterFrequency(cfg.centerFrequency);
     this.setTunedFrequency(cfg.tunedFrequency);
     this.tuningStep = cfg.tuningStep;
@@ -245,8 +329,12 @@ export class RadioReceiverMain extends LitElement {
     this.setSampleRate(cfg.sampleRate);
     this.setPpm(cfg.ppm);
     this.setFftSize(cfg.fftSize);
+    this.enableBiasTee(cfg.biasTee);
     this.minDecibels = cfg.minDecibels;
     this.maxDecibels = cfg.maxDecibels;
+    this.presetSortColumn = cfg.presets.sortColumn;
+    this.presets = cfg.presets.list;
+    this.windowState = cfg.windows;
   }
 
   private isFrequencyValid(freq: Frequency): boolean {
@@ -272,12 +360,60 @@ export class RadioReceiverMain extends LitElement {
     e.preventDefault();
   }
 
-  private onSettings() {
-    this.settingsVisible = true;
+  private onScreenResize() {
+    this.requestUpdate();
   }
 
-  private onSettingsClosed() {
-    this.settingsVisible = false;
+  private onPresets() {
+    this.changeWindowState((s) => (s.presets.open = true));
+  }
+
+  private onSettings() {
+    this.changeWindowState((s) => (s.settings.open = true));
+  }
+
+  private changeWindowState(delta: (state: WindowState) => void) {
+    let newState = { ...this.windowState };
+    delta(newState);
+    this.windowState = newState;
+    this.configProvider.update((cfg) => (cfg.windows = this.windowState));
+  }
+
+  private getWindowName(e: EventTarget | null) {
+    return e === this.mainControlsWindow
+      ? "controls"
+      : e === this.settingsWindow
+        ? "settings"
+        : e === this.presetsWindow
+          ? "presets"
+          : undefined;
+  }
+
+  private onWindowClosed(e: WindowClosedEvent) {
+    const windowName = this.getWindowName(e.target);
+    if (windowName === undefined) return;
+    const window = e.target as RrWindow;
+    const closed = window?.closed;
+    if (closed === undefined) return;
+    this.changeWindowState((s) => (s[windowName].open = !closed));
+  }
+
+  private onWindowMoved(e: WindowMovedEvent) {
+    const windowName = this.getWindowName(e.target);
+    if (windowName === undefined) return;
+    const window = e.target as RrWindow;
+    const position = window?.position;
+    if (!position) return;
+    this.changeWindowState((s) => (s[windowName].position = position));
+  }
+
+  private onWindowResized(e: WindowResizedEvent) {
+    const windowName = this.getWindowName(e.target);
+    if (windowName === undefined) return;
+    const window = e.target as RrWindow;
+    const size = window?.size;
+    if (!size) return;
+    this.changeWindowState((s) => (s[windowName].size = size));
   }
 
   private onScaleChange(e: Event) {
@@ -332,15 +468,22 @@ export class RadioReceiverMain extends LitElement {
     this.setFrequency(newFreq);
   }
 
-  private setFrequency(newFreq: Frequency) {
-    if (newFreq.center != this.frequency.center) {
+  private setFrequency(newFreq: Frequency, force?: boolean) {
+    if (newFreq.center != this.frequency.center || force) {
+      let upconverting =
+        newFreq.center < 28800000 &&
+        this.lowFrequencyMethod.name == "upconverter";
+      let deltaFrequency = upconverting ? this.lowFrequencyMethod.frequency : 0;
       if (newFreq.offset != this.frequency.offset) {
         this.demodulator.expectFrequencyAndSetOffset(
-          newFreq.center,
+          newFreq.center + deltaFrequency,
           newFreq.offset
         );
       }
-      this.radio.setFrequency(newFreq.center);
+      this.radio.setFrequency(newFreq.center + deltaFrequency);
+      this.radio.enableBiasTee(
+        this.biasTee || (upconverting && this.lowFrequencyMethod.biasTee)
+      );
     } else if (newFreq.offset != this.frequency.offset) {
       this.demodulator.setFrequencyOffset(newFreq.offset);
     }
@@ -353,7 +496,7 @@ export class RadioReceiverMain extends LitElement {
 
   private onSchemeChange(e: Event) {
     let target = e.target as RrMainControls;
-    let value = target.mode;
+    let value = target.scheme;
     let mode = this.availableModes.get(value);
     if (mode === undefined) return;
     this.setMode(mode);
@@ -362,47 +505,22 @@ export class RadioReceiverMain extends LitElement {
   private onBandwidthChange(e: Event) {
     let target = e.target as RrMainControls;
     let value = target.bandwidth;
-    let newMode = { ...this.mode };
-    switch (newMode.scheme) {
-      case "WBFM":
-        break;
-      case "NBFM":
-        newMode.maxF = value / 2;
-        break;
-      default:
-        newMode.bandwidth = value;
-        break;
-    }
-    this.setMode(newMode);
+    this.setMode(withBandwidth(value, this.mode));
   }
 
   private onStereoChange(e: Event) {
     let target = e.target as RrMainControls;
     let value = target.stereo;
-    let newMode = { ...this.mode };
-    if (newMode.scheme == "WBFM") {
-      newMode.stereo = value;
-    }
-    this.setMode(newMode);
+    this.setMode(withStereo(value, this.mode));
+  }
+
+  private onSquelchChange(e: Event) {
+    let target = e.target as RrMainControls;
+    let value = target.squelch;
+    this.setMode(withSquelch(value, this.mode));
   }
 
   private setMode(mode: Mode) {
-    switch (mode.scheme) {
-      case "WBFM":
-        break;
-      case "NBFM":
-        mode.maxF = Math.max(250, Math.min(mode.maxF, 30000));
-        break;
-      case "AM":
-        mode.bandwidth = Math.max(250, Math.min(mode.bandwidth, 30000));
-        break;
-      case "CW":
-        mode.bandwidth = Math.max(5, Math.min(mode.bandwidth, 1000));
-        break;
-      default:
-        mode.bandwidth = Math.max(10, Math.min(mode.bandwidth, 15000));
-        break;
-    }
     this.demodulator.setMode(mode);
     this.mode = mode;
     this.availableModes.set(mode.scheme, mode);
@@ -416,24 +534,14 @@ export class RadioReceiverMain extends LitElement {
 
   private updateFrequencyBands() {
     let newFreq = { ...this.frequency };
-    switch (this.mode.scheme) {
-      case "WBFM":
-        newFreq.leftBand = newFreq.rightBand = 75000;
-        break;
-      case "NBFM":
-        newFreq.leftBand = newFreq.rightBand = this.mode.maxF;
-        break;
-      case "AM":
-      case "CW":
-        newFreq.leftBand = newFreq.rightBand = this.mode.bandwidth / 2;
-        break;
-      case "USB":
-        newFreq.leftBand = 0;
-        newFreq.rightBand = this.mode.bandwidth;
-        break;
-      case "LSB":
-        newFreq.leftBand = this.mode.bandwidth;
-        newFreq.rightBand = 0;
+    if (this.mode.scheme == "USB") {
+      newFreq.leftBand = 0;
+      newFreq.rightBand = getBandwidth(this.mode);
+    } else if (this.mode.scheme == "LSB") {
+      newFreq.leftBand = getBandwidth(this.mode);
+      newFreq.rightBand = 0;
+    } else {
+      newFreq.leftBand = newFreq.rightBand = getBandwidth(this.mode) / 2;
     }
     if (!this.isFrequencyValid(newFreq)) {
       newFreq = {
@@ -441,23 +549,13 @@ export class RadioReceiverMain extends LitElement {
         center: newFreq.center + newFreq.offset,
         offset: 0,
       };
-      if (newFreq.center != this.frequency.center) {
-        this.demodulator.expectFrequencyAndSetOffset(
-          newFreq.center,
-          newFreq.offset
-        );
-        this.radio.setFrequency(newFreq.center);
-      } else {
-        this.demodulator.setFrequencyOffset(newFreq.offset);
-      }
     }
-    this.frequency = newFreq;
+    this.setFrequency(newFreq);
   }
 
   private onGainChange(e: Event) {
     let target = e.target as RrMainControls;
-    let gain = target.gain;
-    this.setGain(gain);
+    this.setGain(target.gain);
   }
 
   private setGain(gain: number | null) {
@@ -468,8 +566,7 @@ export class RadioReceiverMain extends LitElement {
 
   private onSampleRateChange(e: Event) {
     let target = e.target as RrSettings;
-    let sampleRate = target.sampleRate;
-    this.setSampleRate(sampleRate);
+    this.setSampleRate(target.sampleRate);
   }
 
   private setSampleRate(sampleRate: number) {
@@ -483,8 +580,7 @@ export class RadioReceiverMain extends LitElement {
 
   private onPpmChange(e: Event) {
     let target = e.target as RrSettings;
-    let ppm = target.ppm;
-    this.setPpm(ppm);
+    this.setPpm(target.ppm);
   }
 
   private setPpm(ppm: number) {
@@ -495,14 +591,76 @@ export class RadioReceiverMain extends LitElement {
 
   private onFftSizeChange(e: Event) {
     let target = e.target as RrSettings;
-    let fftSize = target.fftSize;
-    this.setFftSize(fftSize);
+    this.setFftSize(target.fftSize);
   }
 
   private setFftSize(fftSize: number) {
     this.fftSize = fftSize;
     this.spectrum.size = fftSize;
     this.configProvider.update((cfg) => (cfg.fftSize = fftSize));
+  }
+
+  private onBiasTeeChange(e: Event) {
+    let target = e.target as RrSettings;
+    this.enableBiasTee(target.biasTee);
+  }
+
+  private enableBiasTee(biasTee: boolean) {
+    this.radio.enableBiasTee(biasTee);
+    this.biasTee = biasTee;
+    this.configProvider.update((cfg) => (cfg.biasTee = biasTee));
+  }
+
+  private onLowFrequencyMethodChange(e: Event) {
+    let target = e.target as RrSettings;
+    this.setLowFrequencyMethod(target.lowFrequencyMethod);
+  }
+
+  private setLowFrequencyMethod(method: LowFrequencyMethod) {
+    let directSampling =
+      method.name != "directSampling"
+        ? DirectSampling.Off
+        : method.channel == "Q"
+          ? DirectSampling.Q
+          : DirectSampling.I;
+    this.radio.setDirectSamplingMethod(directSampling);
+    this.lowFrequencyMethod = { ...method };
+    this.setFrequency({ ...this.frequency }, true);
+    this.configProvider.update((cfg) => (cfg.lowFrequencyMethod = method));
+  }
+
+  private onPresetSelected(e: PresetSelectedEvent) {
+    const target = e.target as RrPresets;
+    const presetIndex = target.selectedIndex;
+    if (presetIndex === undefined) return;
+    const preset = target.presets[presetIndex];
+    this.setTunedFrequency(preset.tunedFrequency);
+    this.scale = preset.scale;
+    this.tuningStep = preset.tuningStep;
+    this.setMode(
+      withBandwidth(
+        preset.bandwidth,
+        withStereo(
+          preset.stereo,
+          withSquelch(preset.squelch, getMode(preset.scheme))
+        )
+      )
+    );
+    this.setGain(preset.gain);
+  }
+
+  private onPresetsChanged(e: PresetsChangedEvent) {
+    const target = e.target as RrPresets;
+    let presets = [...target.presets];
+    this.presets = presets;
+    this.configProvider.update((cfg) => (cfg.presets.list = presets));
+  }
+
+  private onPresetsSorted(e: PresetsSortedEvent) {
+    const target = e.target as RrPresets;
+    let sortColumn = target.sortColumn;
+    this.presetSortColumn = sortColumn;
+    this.configProvider.update((cfg) => (cfg.presets.sortColumn = sortColumn));
   }
 
   private onSpectrumTap(e: SpectrumTapEvent) {
@@ -553,9 +711,9 @@ export class RadioReceiverMain extends LitElement {
 
   private setTunedFrequencyFraction(fraction: number) {
     const min =
-      this.frequency.center - this.bandwidth / 2 + this.frequency.rightBand;
+      this.frequency.center - this.bandwidth / 2 + this.frequency.leftBand;
     const max =
-      this.frequency.center + this.bandwidth / 2 - this.frequency.leftBand;
+      this.frequency.center + this.bandwidth / 2 - this.frequency.rightBand;
     let frequency = Math.max(
       min,
       Math.min(this.frequency.center + this.bandwidth * (fraction - 0.5), max)
@@ -567,34 +725,31 @@ export class RadioReceiverMain extends LitElement {
   }
 
   private setSidebandFraction(sideband: "left" | "right", fraction: number) {
-    const min = this.frequency.center - this.bandwidth / 2;
-    const max = this.frequency.center + this.bandwidth / 2;
-    const frequency = this.frequency.center + this.frequency.offset;
-    const sidebandEdge =
-      this.frequency.center + this.bandwidth * (fraction - 0.5);
-    let size =
-      sideband == "left" ? frequency - sidebandEdge : sidebandEdge - frequency;
-    if (frequency - size < min) {
-      size = frequency - min;
-    }
-    if (frequency + size > max) {
-      size = max - frequency;
-    }
-    size = Math.floor(size);
-
-    let newMode = { ...this.mode };
-    switch (newMode.scheme) {
+    const maxLeftSize = Math.floor(this.frequency.offset + this.bandwidth / 2);
+    const maxRightSize = Math.floor(this.bandwidth / 2 - this.frequency.offset);
+    const size = Math.floor(
+      Math.abs(this.frequency.offset - this.bandwidth * (fraction - 0.5))
+    );
+    let newMode;
+    switch (this.mode.scheme) {
       case "WBFM":
-        break;
+        return;
       case "NBFM":
-        newMode.maxF = size;
-        break;
       case "AM":
       case "CW":
-        newMode.bandwidth = size * 2;
+        newMode = withBandwidth(
+          Math.min(size, maxLeftSize, maxRightSize) * 2,
+          this.mode
+        );
         break;
-      default:
-        newMode.bandwidth = size;
+      case "LSB":
+        if (sideband == "right") return;
+        newMode = withBandwidth(Math.min(size, maxLeftSize), this.mode);
+        break;
+      case "USB":
+        if (sideband == "left") return;
+        newMode = withBandwidth(Math.min(size, maxRightSize), this.mode);
+        break;
     }
     this.setMode(newMode);
   }
@@ -625,8 +780,13 @@ export class RadioReceiverMain extends LitElement {
           alert(
             "This browser does not support the HTML5 USB API. Please try Chrome, Edge, or Opera on a computer or Android."
           );
-        } else {
-          alert(error.message);
+        } else if (!this.errorState) {
+          this.errorState = true;
+          if (error.cause) {
+            alert(`${error.message}\n\nCaused by: ${error.cause}`);
+          } else {
+            alert(error.message);
+          }
         }
         break;
       default:
@@ -696,3 +856,5 @@ class CenterFrequencyScroller {
     this.timeout = undefined;
   }
 }
+
+CreateWindowRegistry();
